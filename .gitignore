@@ -26,7 +26,7 @@ share/python-wheels/
 .installed.cfg
 *.egg
 MANIFEST
-requirements.txt
+!requirements.txt
 !examples/**/requirements.txt
 setup.py
 ultralytics.egg-info
@@ -203,3 +203,24 @@ calibration_*.npy
 # Training logs
 args.yaml
 results.csv
+
+# ---- Project-specific exclusions ----
+.gradio/
+.gradio_pid.txt
+.qoder/
+frp/
+frp_windows/
+*.docx
+*.pdf
+
+# gradio source vendored in repo (third-party, too large)
+/gradio/
+
+# cat behavior dataset (too large for git)
+/猫咪行为数据集/
+
+# doc assets
+chapter_yolo26_qwen_pet_vision_audio.docx
+chapter_yolo26_qwen_pet_vision_audio.pdf
+智能宠物行为识别系统技术路线方案.docx
+README_pet_behavior_gradio.md

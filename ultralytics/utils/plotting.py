@@ -212,11 +212,23 @@ class Annotator:
             if self.im.mode not in {"RGB", "RGBA"}:  # multispectral
                 self.im = self.im.convert("RGB")
             self.draw = ImageDraw.Draw(self.im, "RGBA")
-            try:
-                font = check_font("Arial.Unicode.ttf" if non_ascii else font)
-                size = font_size or max(round(sum(self.im.size) / 2 * 0.035), 12)
-                self.font = ImageFont.truetype(str(font), size)
-            except Exception:
+            size = font_size or max(round(sum(self.im.size) / 2 * 0.035), 12)
+            font_candidates = [font]
+            if non_ascii:
+                # Try multiple CJK-capable fonts so corrupted Arial.Unicode.ttf does not force a fallback to ASCII-only text.
+                # Note: use actual Windows font filenames (e.g. C:\Windows\Fonts\simhei.ttf, msyh.ttc, simsun.ttc).
+                font_candidates = ["Arial.Unicode.ttf", "simhei.ttf", "msyh.ttc", "msyhbd.ttc", "simsun.ttc", "SimsunExtG.ttf", font]
+
+            self.font = None
+            for font_name in dict.fromkeys(font_candidates):
+                try:
+                    font_path = check_font(font_name)
+                    if font_path:
+                        self.font = ImageFont.truetype(str(font_path), size)
+                        break
+                except Exception:
+                    continue
+            if self.font is None:
                 self.font = ImageFont.load_default()
             # Deprecation fix for w, h = getsize(string) -> _, _, w, h = getbox(string)
             if check_version(pil_version, "9.2.0"):

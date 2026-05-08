@@ -379,12 +379,15 @@ def plt_settings(rcparams=None, backend="Agg"):
                 known = {f.fname for f in font_manager.fontManager.ttflist}
                 for f in USER_CONFIG_DIR.glob("*.ttf"):
                     if str(f) not in known:
-                        font_manager.fontManager.addfont(str(f))
+                        try:
+                            font_manager.fontManager.addfont(str(f))
+                        except RuntimeError:
+                            pass  # skip corrupted fonts silently
                 wrapper._fonts_registered = True
             rc = (
                 rcparams
                 if "font.sans-serif" in rcparams
-                else {**rcparams, "font.sans-serif": ["Arial Unicode MS", *plt.rcParams.get("font.sans-serif", [])]}
+                else {**rcparams, "font.sans-serif": ["SimHei", "Arial Unicode MS", *plt.rcParams.get("font.sans-serif", [])]}
             )
 
             original_backend = plt.get_backend()
