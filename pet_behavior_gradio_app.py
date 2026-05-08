@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import argparse
 import atexit
 import base64
@@ -21,6 +23,7 @@ from pathlib import Path
 import gradio as gr
 import numpy as np
 from PIL import Image
+
 from ultralytics import YOLO
 
 try:
@@ -59,9 +62,7 @@ def build_logger() -> tuple[logging.Logger, deque[str], threading.Lock]:
     logger.setLevel(logging.INFO)
     if not logger.handlers:
         handler = logging.StreamHandler()
-        handler.setFormatter(
-            logging.Formatter("%(asctime)s | %(levelname)s | %(message)s")
-        )
+        handler.setFormatter(logging.Formatter("%(asctime)s | %(levelname)s | %(message)s"))
         logger.addHandler(handler)
     log_buffer: deque[str] = deque(maxlen=MAX_LOG_LINES)
     log_lock = threading.Lock()
@@ -171,7 +172,7 @@ FRP_PROXY_NAME = "gradio-pet-behavior"
 PUBLIC_DOMAIN = os.environ.get("FRP_PUBLIC_DOMAIN", "localhost")
 PUBLIC_URL = f"http://{PUBLIC_DOMAIN}:{FRP_REMOTE_PORT}"
 FRP_STARTUP_WAIT = 4  # frpc 启动后等待连通时间(秒)
-FRP_MAX_RETRIES = 3   # 启动失败重试次数
+FRP_MAX_RETRIES = 3  # 启动失败重试次数
 
 
 def find_available_port(start_port: int, max_attempts: int = 100) -> int:
@@ -324,10 +325,7 @@ def list_serial_ports() -> tuple[list[str], str]:
         return [], "pyserial 未安装，请先在 yolo 环境中安装 pyserial。"
     ports = list(serial.tools.list_ports.comports())
     choices = [port.device for port in ports]
-    lines = [
-        f"{port.device} | {port.description} | hwid={port.hwid}"
-        for port in ports
-    ]
+    lines = [f"{port.device} | {port.description} | hwid={port.hwid}" for port in ports]
     return choices, "\n".join(lines) if lines else "未发现串口设备。"
 
 
@@ -359,18 +357,15 @@ def send_ch340_packet(
 
     tx = data + ("\n" if append_newline else "")
     try:
-        with serial.Serial(port=port, baudrate=int(baudrate), timeout=max(read_wait, 0.1)) as ser:
-            ser.reset_input_buffer()
-            ser.write(tx.encode("utf-8"))
-            ser.flush()
+        with serial.Serial(port=port, baudrate=int(baudrate), timeout=max(read_wait, 0.1)) as set:
+            set.reset_input_buffer()
+            set.write(tx.encode("utf-8"))
+            set.flush()
             time.sleep(max(read_wait, 0.0))
-            waiting = ser.in_waiting
-            raw = ser.read(waiting or 256)
+            waiting = set.in_waiting
+            raw = set.read(waiting or 256)
         rx = raw.decode("utf-8", errors="replace").strip() if raw else ""
-        result = (
-            f"TX ({port} @ {baudrate}): {data}\n"
-            f"RX: {rx or '<无返回>'}"
-        )
+        result = f"TX ({port} @ {baudrate}): {data}\nRX: {rx or '<无返回>'}"
         client_state = client_log(client_state, f"CH340 发包完成 | port={port} | tx={data} | rx={rx or '<empty>'}")
         return result, get_client_logs(client_state), client_state
     except Exception as exc:
@@ -695,8 +690,7 @@ def run_yolo_detection(
     start = time.perf_counter()
     model = MODEL_MANAGER.get_model()
     push_log(
-        f"开始YOLO推理 | image={image_path} | conf={conf_threshold:.2f} | "
-        f"iou={iou_threshold:.2f} | max_det={max_det}"
+        f"开始YOLO推理 | image={image_path} | conf={conf_threshold:.2f} | iou={iou_threshold:.2f} | max_det={max_det}"
     )
     results = model.predict(
         source=image_path,
@@ -729,9 +723,7 @@ def run_yolo_detection(
         rows.append([idx, label, round(conf, 4), str(xyxy)])
 
     summary = format_detection_summary(detections)
-    push_log(
-        f"YOLO推理完成 | det_count={len(detections)} | cost_ms={elapsed:.2f} | summary={summary}"
-    )
+    push_log(f"YOLO推理完成 | det_count={len(detections)} | cost_ms={elapsed:.2f} | summary={summary}")
     return annotated, rows, detections, summary
 
 
@@ -739,9 +731,7 @@ def resolve_api_key(api_key_input: str) -> str:
     api_key_input = (api_key_input or "").strip()
     if api_key_input:
         return api_key_input
-    return os.environ.get("DASHSCOPE_API_KEY", "").strip() or os.environ.get(
-        "QWEN_API_KEY", ""
-    ).strip()
+    return os.environ.get("DASHSCOPE_API_KEY", "").strip() or os.environ.get("QWEN_API_KEY", "").strip()
 
 
 def analyze_image(
@@ -822,7 +812,13 @@ def analyze_audio(
     client_state = client_state or new_client_state()
     if not audio_path:
         client_state = client_log(client_state, "音频分析未执行：未上传音频", "warning")
-        return "请先上传音频。", "", format_client_audio_records(client_state), get_client_logs(client_state), client_state
+        return (
+            "请先上传音频。",
+            "",
+            format_client_audio_records(client_state),
+            get_client_logs(client_state),
+            client_state,
+        )
 
     try:
         private_audio_path, client_state = store_client_audio(audio_path, client_state)
@@ -867,11 +863,7 @@ def analyze_audio(
             context_text=f"音频识别与元信息如下：\n{metadata_text}",
             max_tokens=380,
         )
-        report = (
-            f"本次音频识别模型：{asr_used_model}\n"
-            f"本次音频解释模型：{reasoning_used_model}\n\n"
-            f"{report}"
-        )
+        report = f"本次音频识别模型：{asr_used_model}\n本次音频解释模型：{reasoning_used_model}\n\n{report}"
         client_state = client_log(client_state, "音频分析流程完成")
         return (
             metadata_text,
@@ -1224,27 +1216,21 @@ def build_demo() -> gr.Blocks:
 
             image_model_name.change(
                 fn=lambda model_name, audio_asr, audio_reason: (
-                    f"图片分析默认模型：{model_name}\n"
-                    f"音频识别默认模型：{audio_asr}\n"
-                    f"音频解释默认模型：{audio_reason}"
+                    f"图片分析默认模型：{model_name}\n音频识别默认模型：{audio_asr}\n音频解释默认模型：{audio_reason}"
                 ),
                 inputs=[image_model_name, audio_asr_model_name, audio_reasoning_model_name],
                 outputs=[model_overview],
             )
             audio_asr_model_name.change(
                 fn=lambda model_name, audio_asr, audio_reason: (
-                    f"图片分析默认模型：{model_name}\n"
-                    f"音频识别默认模型：{audio_asr}\n"
-                    f"音频解释默认模型：{audio_reason}"
+                    f"图片分析默认模型：{model_name}\n音频识别默认模型：{audio_asr}\n音频解释默认模型：{audio_reason}"
                 ),
                 inputs=[image_model_name, audio_asr_model_name, audio_reasoning_model_name],
                 outputs=[model_overview],
             )
             audio_reasoning_model_name.change(
                 fn=lambda model_name, audio_asr, audio_reason: (
-                    f"图片分析默认模型：{model_name}\n"
-                    f"音频识别默认模型：{audio_asr}\n"
-                    f"音频解释默认模型：{audio_reason}"
+                    f"图片分析默认模型：{model_name}\n音频识别默认模型：{audio_asr}\n音频解释默认模型：{audio_reason}"
                 ),
                 inputs=[image_model_name, audio_asr_model_name, audio_reasoning_model_name],
                 outputs=[model_overview],
@@ -1288,7 +1274,9 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=APP_TITLE)
     parser.add_argument("--host", default="0.0.0.0", help="Gradio监听地址")
     parser.add_argument(
-        "--port", type=int, default=DEFAULT_LOCAL_PORT,
+        "--port",
+        type=int,
+        default=DEFAULT_LOCAL_PORT,
         help=f"Gradio本地端口 (默认 {DEFAULT_LOCAL_PORT})",
     )
     parser.add_argument(
@@ -1320,10 +1308,7 @@ def main() -> None:
         if frpc_proc is not None:
             atexit.register(lambda: _stop_own_frpc())
 
-    push_log(
-        f"应用启动 | host={args.host} | port={port} | "
-        f"frp={'on' if frpc_proc else 'off'} | weight={args.weight}"
-    )
+    push_log(f"应用启动 | host={args.host} | port={port} | frp={'on' if frpc_proc else 'off'} | weight={args.weight}")
 
     demo = build_demo()
     demo.launch(
