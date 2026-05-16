@@ -219,6 +219,9 @@ frp_windows/
 # cat behavior dataset (too large for git)
 /猫咪行为数据集/
 
+# Windows reserved device name artifact
+nul
+
 # doc assets
 chapter_yolo26_qwen_pet_vision_audio.docx
 chapter_yolo26_qwen_pet_vision_audio.pdf
