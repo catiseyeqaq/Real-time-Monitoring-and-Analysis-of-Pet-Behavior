@@ -35,23 +35,66 @@ except ImportError:
 
 APP_TITLE = "智能宠物行为识别演示系统"
 ROOT_DIR = Path(__file__).resolve().parent
-DEFAULT_WEIGHT = ROOT_DIR / "runs" / "train" / "cat_behavior_yolo26n-2" / "weights" / "best.pt"
+DEFAULT_WEIGHT_CANDIDATES = [
+    ROOT_DIR / "runs" / "train" / "cat_behavior_yolo26n" / "weights" / "best.pt",
+    ROOT_DIR / "runs" / "train" / "yolo-GDL" / "weights" / "best.pt",
+]
+DEFAULT_WEIGHT = next(
+    (weight_path for weight_path in DEFAULT_WEIGHT_CANDIDATES if weight_path.exists()),
+    DEFAULT_WEIGHT_CANDIDATES[0],
+)
 DEFAULT_API_BASE = "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions"
 DEFAULT_IMAGE_MODEL = "qwen3.5-flash"
-DEFAULT_AUDIO_ASR_MODEL = "qwen3-asr-flash"
-DEFAULT_AUDIO_REASONING_MODEL = "qwen3.5-flash"
+DEFAULT_AUDIO_ASR_MODEL = "不使用ASR"
+DEFAULT_AUDIO_REASONING_MODEL = "qwen3.5-omni-plus"
 DEFAULT_IMAGE_PROMPT = (
     "你是宠物行为分析助手。请结合图片内容和YOLO检测结果，判断猫咪当前行为，"
     "说明置信依据、可能的健康风险，并给出主人建议。请使用中文分点输出。"
 )
 DEFAULT_AUDIO_PROMPT = (
-    "你是宠物叫声分析助手。请结合音频转写文本、语种、情绪标注和文件元信息，"
-    "分析猫咪可能的情绪、需求或异常状态，给出判断依据、风险提示和主人建议。请使用中文分点输出。"
+    "你是一个宠物声音行为分析助手。请直接分析音频中的猫叫声，不要把猫叫当成人类语音转写。"
+    "只能从以下标签中选择一个最可能的主标签："
+    "hungry（饥饿/要食物）、attention（求关注/撒娇）、fear（害怕/紧张）、"
+    "pain（疼痛/不适）、warning（生气/警告）、fighting（打架/攻击/激烈对峙）、mating（发情）、"
+    "relaxed（放松/普通叫声）、unknown（无法判断）。"
+    "判定规则：如果听到尖锐尖叫、低吼、哈气、咆哮、突然爆发、两只猫对峙或连续冲突声，优先判为fighting或warning，不要判为mating。"
+    "只有在叫声持续拖长、反复求偶式嚎叫、没有明显攻击/恐惧/冲突特征时，才可判为mating。"
+    "如果音频像猫咪吵架、抢地盘、互相威胁或攻击，请判为fighting。"
+    "请只输出JSON，不要输出其他内容，格式为："
+    '{"emotion":"hungry|attention|fear|pain|warning|fighting|mating|relaxed|unknown",'
+    '"confidence":0.0,"urgency":1,"reason":"一句话说明判断依据",'
+    '"suggestion":"一句话给主人建议"}'
 )
 MAX_LOG_LINES = 200
 QWEN_IMAGE_MAX_SIDE = 1024
 QWEN_IMAGE_JPEG_QUALITY = 82
 CLIENT_DATA_DIR = ROOT_DIR / ".gradio" / "client_data"
+QWEN_TEMP_DIR = ROOT_DIR / ".gradio" / "qwen_temp"
+MAX_AUDIO_AGE_DAYS = 7
+
+
+def cleanup_old_temp_files() -> None:
+    for d in [QWEN_TEMP_DIR, CLIENT_DATA_DIR]:
+        if not d.exists():
+            continue
+        now = time.time()
+        removed = 0
+        for p in d.rglob("*"):
+            if p.is_file() and (now - p.stat().st_mtime) > MAX_AUDIO_AGE_DAYS * 86400:
+                try:
+                    p.unlink()
+                    removed += 1
+                except OSError:
+                    pass
+        # remove empty dirs
+        for p in sorted(d.rglob("*"), key=lambda x: len(str(x)), reverse=True):
+            if p.is_dir() and not any(p.iterdir()):
+                try:
+                    p.rmdir()
+                except OSError:
+                    pass
+        if removed:
+            push_log(f"已清理 {removed} 个过期临时文件（{MAX_AUDIO_AGE_DAYS}天以上）", level="info")
 
 
 def build_logger() -> tuple[logging.Logger, deque[str], threading.Lock]:
@@ -59,9 +102,7 @@ def build_logger() -> tuple[logging.Logger, deque[str], threading.Lock]:
     logger.setLevel(logging.INFO)
     if not logger.handlers:
         handler = logging.StreamHandler()
-        handler.setFormatter(
-            logging.Formatter("%(asctime)s | %(levelname)s | %(message)s")
-        )
+        handler.setFormatter(logging.Formatter("%(asctime)s | %(levelname)s | %(message)s"))
         logger.addHandler(handler)
     log_buffer: deque[str] = deque(maxlen=MAX_LOG_LINES)
     log_lock = threading.Lock()
@@ -81,6 +122,13 @@ def push_log(message: str, level: str = "info") -> None:
 def get_recent_logs() -> str:
     with LOG_LOCK:
         return "\n".join(LOG_BUFFER) if LOG_BUFFER else "暂无日志。"
+
+
+# 应用启动时清理一次过期临时文件
+cleanup_old_temp_files()
+
+
+MAX_AUDIO_RECORDS = 100
 
 
 def new_client_state() -> dict:
@@ -130,7 +178,9 @@ def store_client_audio(audio_path: str, state: dict | None) -> tuple[str, dict]:
         "path": str(target),
         "size_kb": round(target.stat().st_size / 1024, 2),
     }
-    state.setdefault("audio_records", []).append(record)
+    records = state.setdefault("audio_records", [])
+    records.append(record)
+    del records[:-MAX_AUDIO_RECORDS]
     return str(target), state
 
 
@@ -152,6 +202,11 @@ class ModelManager:
         if self._model is None:
             with self._lock:
                 if self._model is None:
+                    if not self.weight_path.exists():
+                        raise FileNotFoundError(
+                            f"YOLO权重文件不存在: {self.weight_path}\n"
+                            f"请先使用 train.py 训练模型，或通过 --weight 参数指定正确的权重路径。"
+                        )
                     push_log(f"开始加载YOLO权重: {self.weight_path}")
                     self._model = YOLO(str(self.weight_path))
                     push_log("YOLO权重加载完成")
@@ -171,7 +226,7 @@ FRP_PROXY_NAME = "gradio-pet-behavior"
 PUBLIC_DOMAIN = os.environ.get("FRP_PUBLIC_DOMAIN", "localhost")
 PUBLIC_URL = f"http://{PUBLIC_DOMAIN}:{FRP_REMOTE_PORT}"
 FRP_STARTUP_WAIT = 4  # frpc 启动后等待连通时间(秒)
-FRP_MAX_RETRIES = 3   # 启动失败重试次数
+FRP_MAX_RETRIES = 3  # 启动失败重试次数
 
 
 def find_available_port(start_port: int, max_attempts: int = 100) -> int:
@@ -243,14 +298,19 @@ def _stop_own_frpc() -> None:
         pid_file.unlink(missing_ok=True)
         return
     try:
-        subprocess.run(
-            ["taskkill", "/PID", str(old_pid), "/F"],
-            capture_output=True,
-            text=True,
-            encoding="gbk",
-            errors="ignore",
-        )
+        if os.name == "nt":
+            subprocess.run(
+                ["taskkill", "/PID", str(old_pid), "/F"],
+                capture_output=True,
+                text=True,
+                encoding="gbk",
+                errors="ignore",
+            )
+        else:
+            os.kill(old_pid, 9)
         push_log(f"已清理本 App 旧 frpc 进程 (PID={old_pid})")
+    except (ProcessLookupError, OSError) as _exc:
+        push_log(f"清理 frpc 进程 (PID={old_pid}) 时忽略: {_exc}", level="debug")
     except Exception:
         pass
     finally:
@@ -324,10 +384,7 @@ def list_serial_ports() -> tuple[list[str], str]:
         return [], "pyserial 未安装，请先在 yolo 环境中安装 pyserial。"
     ports = list(serial.tools.list_ports.comports())
     choices = [port.device for port in ports]
-    lines = [
-        f"{port.device} | {port.description} | hwid={port.hwid}"
-        for port in ports
-    ]
+    lines = [f"{port.device} | {port.description} | hwid={port.hwid}" for port in ports]
     return choices, "\n".join(lines) if lines else "未发现串口设备。"
 
 
@@ -367,10 +424,7 @@ def send_ch340_packet(
             waiting = ser.in_waiting
             raw = ser.read(waiting or 256)
         rx = raw.decode("utf-8", errors="replace").strip() if raw else ""
-        result = (
-            f"TX ({port} @ {baudrate}): {data}\n"
-            f"RX: {rx or '<无返回>'}"
-        )
+        result = f"TX ({port} @ {baudrate}): {data}\nRX: {rx or '<无返回>'}"
         client_state = client_log(client_state, f"CH340 发包完成 | port={port} | tx={data} | rx={rx or '<empty>'}")
         return result, get_client_logs(client_state), client_state
     except Exception as exc:
@@ -424,6 +478,9 @@ def prepare_image_for_qwen(image_path: str) -> tuple[str, dict]:
     original_path = Path(image_path)
     original_size_kb = round(original_path.stat().st_size / 1024, 2)
 
+    QWEN_TEMP_DIR.mkdir(parents=True, exist_ok=True)
+    temp_path = str(QWEN_TEMP_DIR / f"qwen_img_{uuid.uuid4().hex[:12]}.jpg")
+
     with Image.open(image_path) as image:
         image = image.convert("RGB")
         original_width, original_height = image.size
@@ -437,13 +494,6 @@ def prepare_image_for_qwen(image_path: str) -> tuple[str, dict]:
         else:
             resized_width, resized_height = original_width, original_height
 
-        temp_file = tempfile.NamedTemporaryFile(
-            prefix="qwen_img_",
-            suffix=".jpg",
-            delete=False,
-        )
-        temp_path = temp_file.name
-        temp_file.close()
         image.save(
             temp_path,
             format="JPEG",
@@ -691,12 +741,22 @@ def run_yolo_detection(
     conf_threshold: float,
     iou_threshold: float,
     max_det: int,
+    device: str = "",
 ) -> tuple[np.ndarray, list[list], list[dict], str]:
     start = time.perf_counter()
     model = MODEL_MANAGER.get_model()
     push_log(
         f"开始YOLO推理 | image={image_path} | conf={conf_threshold:.2f} | "
-        f"iou={iou_threshold:.2f} | max_det={max_det}"
+        f"iou={iou_threshold:.2f} | max_det={max_det} | device='{device or 'auto'}'"
+    )
+    results = model.predict(
+        source=image_path,
+        conf=conf_threshold,
+        iou=iou_threshold,
+        imgsz=640,
+        max_det=max_det,
+        verbose=False,
+        device=device or None,
     )
     results = model.predict(
         source=image_path,
@@ -729,9 +789,7 @@ def run_yolo_detection(
         rows.append([idx, label, round(conf, 4), str(xyxy)])
 
     summary = format_detection_summary(detections)
-    push_log(
-        f"YOLO推理完成 | det_count={len(detections)} | cost_ms={elapsed:.2f} | summary={summary}"
-    )
+    push_log(f"YOLO推理完成 | det_count={len(detections)} | cost_ms={elapsed:.2f} | summary={summary}")
     return annotated, rows, detections, summary
 
 
@@ -739,9 +797,7 @@ def resolve_api_key(api_key_input: str) -> str:
     api_key_input = (api_key_input or "").strip()
     if api_key_input:
         return api_key_input
-    return os.environ.get("DASHSCOPE_API_KEY", "").strip() or os.environ.get(
-        "QWEN_API_KEY", ""
-    ).strip()
+    return os.environ.get("DASHSCOPE_API_KEY", "").strip() or os.environ.get("QWEN_API_KEY", "").strip()
 
 
 def analyze_image(
@@ -749,6 +805,7 @@ def analyze_image(
     conf_threshold: float,
     iou_threshold: float,
     max_det: int,
+    device: str,
     api_key_input: str,
     api_base: str,
     image_model_name: str,
@@ -767,6 +824,7 @@ def analyze_image(
             conf_threshold=conf_threshold,
             iou_threshold=iou_threshold,
             max_det=max_det,
+            device=device,
         )
         api_key = resolve_api_key(api_key_input)
         if not api_key:
@@ -822,7 +880,13 @@ def analyze_audio(
     client_state = client_state or new_client_state()
     if not audio_path:
         client_state = client_log(client_state, "音频分析未执行：未上传音频", "warning")
-        return "请先上传音频。", "", format_client_audio_records(client_state), get_client_logs(client_state), client_state
+        return (
+            "请先上传音频。",
+            "",
+            format_client_audio_records(client_state),
+            get_client_logs(client_state),
+            client_state,
+        )
 
     try:
         private_audio_path, client_state = store_client_audio(audio_path, client_state)
@@ -844,18 +908,10 @@ def analyze_audio(
                 client_state,
             )
 
-        transcript, annotation_info, asr_used_model = call_qwen_asr_api(
-            api_key=api_key,
-            api_base=api_base,
-            model_name=audio_asr_model_name,
-            audio_path=private_audio_path,
-        )
         merged_metadata = {
             **metadata,
-            "识别文本": transcript,
-            "识别语种": annotation_info.get("language", "unknown"),
-            "识别情绪": annotation_info.get("emotion", "unknown"),
-            "ASR模型": asr_used_model,
+            "分析方式": "直接音频理解，不调用ASR转写",
+            "音频识别模型": audio_asr_model_name or DEFAULT_AUDIO_ASR_MODEL,
         }
         metadata_text = json.dumps(merged_metadata, ensure_ascii=False, indent=2)
 
@@ -864,14 +920,16 @@ def analyze_audio(
             api_base=api_base,
             model_name=audio_reasoning_model_name,
             prompt=audio_prompt or DEFAULT_AUDIO_PROMPT,
-            context_text=f"音频识别与元信息如下：\n{metadata_text}",
-            max_tokens=380,
+            context_text=(
+                "音频文件元信息如下，请结合原始猫叫音频直接判断猫咪情绪。"
+                "特别注意区分猫咪吵架/攻击/对峙与发情叫声；有冲突特征时优先输出fighting。\n"
+                f"{metadata_text}"
+            ),
+            audio_path=private_audio_path,
+            temperature=0.1,
+            max_tokens=480,
         )
-        report = (
-            f"本次音频识别模型：{asr_used_model}\n"
-            f"本次音频解释模型：{reasoning_used_model}\n\n"
-            f"{report}"
-        )
+        report = f"本次音频识别模型：未调用ASR\n本次猫叫情绪分析模型：{reasoning_used_model}\n\n{report}"
         client_state = client_log(client_state, "音频分析流程完成")
         return (
             metadata_text,
@@ -914,8 +972,8 @@ def build_demo() -> gr.Blocks:
 
                 **2. 音频叫声分析**
                 - 上传猫咪叫声音频（支持 WAV 等常见格式）
-                - 系统先通过 **Qwen ASR** 识别声音内容、语种与情绪
-                - 再由 **Qwen** 分析猫咪情绪状态、潜在需求或异常
+                - 系统直接通过 **Qwen Omni** 分析猫叫音频，不再把猫叫当成人类语音做 ASR 转写
+                - Qwen 会按固定标签输出猫咪情绪、置信度、紧急程度和主人建议
 
                 ---
                 ### 重要提示
@@ -925,6 +983,8 @@ def build_demo() -> gr.Blocks:
                 - API Key 仅保存在当前会话内存中，关闭页面后不会留存
 
                 **获取 API Key：** 访问 [阿里云百炼平台](https://bailian.console.aliyun.com/) 开通 DashScope 服务即可获取
+
+                > **安全提示：** API Key 仅保存在当前浏览器会话内存中，关闭页面后自动清除。建议单独申请专用子 Key 并设置额度限制，避免使用高权限主 Key。
 
                 ---
                 """,
@@ -947,7 +1007,7 @@ def build_demo() -> gr.Blocks:
                 # {APP_TITLE}
                 支持两类演示流程：
                 1. 上传猫咪图片，先做 YOLO 目标检测，再把图片和检测结果交给 Qwen 做语义分析。
-                2. 上传预先准备好的猫叫声音频，提取元信息后交给 Qwen 做情绪/需求分析。
+                2. 上传预先准备好的猫叫声音频，提取元信息后直接交给 Qwen Omni 做猫叫情绪分类。
 
                 后台终端会打印详细日志，页面中也会同步显示最近日志，方便调试。
                 """
@@ -968,7 +1028,7 @@ def build_demo() -> gr.Blocks:
                     value=(
                         f"图片分析默认模型：{DEFAULT_IMAGE_MODEL}\n"
                         f"音频识别默认模型：{DEFAULT_AUDIO_ASR_MODEL}\n"
-                        f"音频解释默认模型：{DEFAULT_AUDIO_REASONING_MODEL}"
+                        f"猫叫情绪分析默认模型：{DEFAULT_AUDIO_REASONING_MODEL}"
                     ),
                     lines=3,
                     interactive=False,
@@ -1006,6 +1066,13 @@ def build_demo() -> gr.Blocks:
                                 step=1,
                                 label="最多保留目标数",
                             )
+                            device = gr.Dropdown(
+                                label="YOLO 推理设备",
+                                choices=["", "cpu", "cuda:0", "cuda:1"],
+                                value="",
+                                allow_custom_value=True,
+                                info="留空自动检测，可选 cpu / cuda:0 等",
+                            )
                             image_model_name = gr.Textbox(
                                 label="图片分析模型名",
                                 value=DEFAULT_IMAGE_MODEL,
@@ -1023,7 +1090,6 @@ def build_demo() -> gr.Blocks:
                                 headers=["序号", "类别", "置信度", "边界框"],
                                 datatype=["number", "str", "number", "str"],
                                 row_count=1,
-                                column_count=(4, "fixed"),
                                 label="检测详情",
                             )
                             detection_summary = gr.Textbox(
@@ -1049,11 +1115,11 @@ def build_demo() -> gr.Blocks:
                                 label="上传预先准备好的猫叫声音频",
                             )
                             audio_asr_model_name = gr.Textbox(
-                                label="音频识别模型名",
+                                label="音频识别模型名（猫叫分析不使用ASR）",
                                 value=DEFAULT_AUDIO_ASR_MODEL,
                             )
                             audio_reasoning_model_name = gr.Textbox(
-                                label="音频解释模型名",
+                                label="猫叫情绪分析模型名",
                                 value=DEFAULT_AUDIO_REASONING_MODEL,
                             )
                             audio_prompt = gr.Textbox(
@@ -1069,14 +1135,13 @@ def build_demo() -> gr.Blocks:
                                 lines=8,
                             )
                             audio_report = gr.Textbox(
-                                label="Qwen 音频分析报告",
+                                label="Qwen 猫叫情绪分析报告",
                                 lines=12,
                             )
                             audio_records = gr.Dataframe(
                                 headers=["序号", "上传时间", "文件名", "大小KB"],
                                 datatype=["number", "str", "str", "number"],
                                 row_count=1,
-                                column_count=(4, "fixed"),
                                 label="本会话音频记录",
                             )
                             audio_logs = gr.Textbox(
@@ -1153,6 +1218,7 @@ def build_demo() -> gr.Blocks:
                     conf_threshold,
                     iou_threshold,
                     max_det,
+                    device,
                     api_key_input,
                     api_base,
                     image_model_name,
@@ -1222,29 +1288,10 @@ def build_demo() -> gr.Blocks:
                 outputs=[hardware_result, hardware_logs, client_state],
             )
 
-            image_model_name.change(
+            gr.on(
+                triggers=[image_model_name.change, audio_asr_model_name.change, audio_reasoning_model_name.change],
                 fn=lambda model_name, audio_asr, audio_reason: (
-                    f"图片分析默认模型：{model_name}\n"
-                    f"音频识别默认模型：{audio_asr}\n"
-                    f"音频解释默认模型：{audio_reason}"
-                ),
-                inputs=[image_model_name, audio_asr_model_name, audio_reasoning_model_name],
-                outputs=[model_overview],
-            )
-            audio_asr_model_name.change(
-                fn=lambda model_name, audio_asr, audio_reason: (
-                    f"图片分析默认模型：{model_name}\n"
-                    f"音频识别默认模型：{audio_asr}\n"
-                    f"音频解释默认模型：{audio_reason}"
-                ),
-                inputs=[image_model_name, audio_asr_model_name, audio_reasoning_model_name],
-                outputs=[model_overview],
-            )
-            audio_reasoning_model_name.change(
-                fn=lambda model_name, audio_asr, audio_reason: (
-                    f"图片分析默认模型：{model_name}\n"
-                    f"音频识别默认模型：{audio_asr}\n"
-                    f"音频解释默认模型：{audio_reason}"
+                    f"图片分析默认模型：{model_name}\n音频识别默认模型：{audio_asr}\n猫叫情绪分析默认模型：{audio_reason}"
                 ),
                 inputs=[image_model_name, audio_asr_model_name, audio_reasoning_model_name],
                 outputs=[model_overview],
@@ -1288,7 +1335,9 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=APP_TITLE)
     parser.add_argument("--host", default="0.0.0.0", help="Gradio监听地址")
     parser.add_argument(
-        "--port", type=int, default=DEFAULT_LOCAL_PORT,
+        "--port",
+        type=int,
+        default=DEFAULT_LOCAL_PORT,
         help=f"Gradio本地端口 (默认 {DEFAULT_LOCAL_PORT})",
     )
     parser.add_argument(
@@ -1320,10 +1369,7 @@ def main() -> None:
         if frpc_proc is not None:
             atexit.register(lambda: _stop_own_frpc())
 
-    push_log(
-        f"应用启动 | host={args.host} | port={port} | "
-        f"frp={'on' if frpc_proc else 'off'} | weight={args.weight}"
-    )
+    push_log(f"应用启动 | host={args.host} | port={port} | frp={'on' if frpc_proc else 'off'} | weight={args.weight}")
 
     demo = build_demo()
     demo.launch(
