@@ -387,7 +387,10 @@ def plt_settings(rcparams=None, backend="Agg"):
             rc = (
                 rcparams
                 if "font.sans-serif" in rcparams
-                else {**rcparams, "font.sans-serif": ["SimHei", "Arial Unicode MS", *plt.rcParams.get("font.sans-serif", [])]}
+                else {
+                    **rcparams,
+                    "font.sans-serif": ["SimHei", "Arial Unicode MS", *plt.rcParams.get("font.sans-serif", [])],
+                }
             )
 
             original_backend = plt.get_backend()
