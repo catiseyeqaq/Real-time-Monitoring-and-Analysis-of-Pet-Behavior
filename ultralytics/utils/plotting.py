@@ -217,7 +217,15 @@ class Annotator:
             if non_ascii:
                 # Try multiple CJK-capable fonts so corrupted Arial.Unicode.ttf does not force a fallback to ASCII-only text.
                 # Note: use actual Windows font filenames (e.g. C:\Windows\Fonts\simhei.ttf, msyh.ttc, simsun.ttc).
-                font_candidates = ["Arial.Unicode.ttf", "simhei.ttf", "msyh.ttc", "msyhbd.ttc", "simsun.ttc", "SimsunExtG.ttf", font]
+                font_candidates = [
+                    "Arial.Unicode.ttf",
+                    "simhei.ttf",
+                    "msyh.ttc",
+                    "msyhbd.ttc",
+                    "simsun.ttc",
+                    "SimsunExtG.ttf",
+                    font,
+                ]
 
             self.font = None
             for font_name in dict.fromkeys(font_candidates):
