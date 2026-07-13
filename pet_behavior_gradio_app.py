@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import argparse
 import atexit
 import base64
@@ -8,7 +10,6 @@ import os
 import shutil
 import socket
 import subprocess
-import tempfile
 import threading
 import time
 import urllib.error
@@ -21,6 +22,7 @@ from pathlib import Path
 import gradio as gr
 import numpy as np
 from PIL import Image
+
 from ultralytics import YOLO
 
 try:
@@ -416,13 +418,13 @@ def send_ch340_packet(
 
     tx = data + ("\n" if append_newline else "")
     try:
-        with serial.Serial(port=port, baudrate=int(baudrate), timeout=max(read_wait, 0.1)) as ser:
-            ser.reset_input_buffer()
-            ser.write(tx.encode("utf-8"))
-            ser.flush()
+        with serial.Serial(port=port, baudrate=int(baudrate), timeout=max(read_wait, 0.1)) as set:
+            set.reset_input_buffer()
+            set.write(tx.encode("utf-8"))
+            set.flush()
             time.sleep(max(read_wait, 0.0))
-            waiting = ser.in_waiting
-            raw = ser.read(waiting or 256)
+            waiting = set.in_waiting
+            raw = set.read(waiting or 256)
         rx = raw.decode("utf-8", errors="replace").strip() if raw else ""
         result = f"TX ({port} @ {baudrate}): {data}\nRX: {rx or '<无返回>'}"
         client_state = client_log(client_state, f"CH340 发包完成 | port={port} | tx={data} | rx={rx or '<empty>'}")
