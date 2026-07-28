@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import argparse
 import atexit
 import base64
@@ -8,7 +10,6 @@ import os
 import shutil
 import socket
 import subprocess
-import tempfile
 import threading
 import time
 import urllib.error
@@ -21,6 +22,7 @@ from pathlib import Path
 import gradio as gr
 import numpy as np
 from PIL import Image
+
 from ultralytics import YOLO
 
 try:
@@ -416,13 +418,13 @@ def send_ch340_packet(
 
     tx = data + ("\n" if append_newline else "")
     try:
-        with serial.Serial(port=port, baudrate=int(baudrate), timeout=max(read_wait, 0.1)) as ser:
-            ser.reset_input_buffer()
-            ser.write(tx.encode("utf-8"))
-            ser.flush()
+        with serial.Serial(port=port, baudrate=int(baudrate), timeout=max(read_wait, 0.1)) as set:
+            set.reset_input_buffer()
+            set.write(tx.encode("utf-8"))
+            set.flush()
             time.sleep(max(read_wait, 0.0))
-            waiting = ser.in_waiting
-            raw = ser.read(waiting or 256)
+            waiting = set.in_waiting
+            raw = set.read(waiting or 256)
         rx = raw.decode("utf-8", errors="replace").strip() if raw else ""
         result = f"TX ({port} @ {baudrate}): {data}\nRX: {rx or '<无返回>'}"
         client_state = client_log(client_state, f"CH340 发包完成 | port={port} | tx={data} | rx={rx or '<empty>'}")
@@ -1038,117 +1040,115 @@ def build_demo() -> gr.Blocks:
                 )
 
             with gr.Tabs():
-                with gr.Tab("图片行为分析"):
-                    with gr.Row():
-                        with gr.Column(scale=1):
-                            image_input = gr.Image(
-                                type="filepath",
-                                label="上传待分析图片",
-                            )
-                            conf_threshold = gr.Slider(
-                                minimum=0.1,
-                                maximum=0.9,
-                                value=0.25,
-                                step=0.05,
-                                label="置信度阈值",
-                            )
-                            iou_threshold = gr.Slider(
-                                minimum=0.1,
-                                maximum=0.9,
-                                value=0.45,
-                                step=0.05,
-                                label="NMS IoU 阈值",
-                            )
-                            max_det = gr.Slider(
-                                minimum=1,
-                                maximum=50,
-                                value=20,
-                                step=1,
-                                label="最多保留目标数",
-                            )
-                            device = gr.Dropdown(
-                                label="YOLO 推理设备",
-                                choices=["", "cpu", "cuda:0", "cuda:1"],
-                                value="",
-                                allow_custom_value=True,
-                                info="留空自动检测，可选 cpu / cuda:0 等",
-                            )
-                            image_model_name = gr.Textbox(
-                                label="图片分析模型名",
-                                value=DEFAULT_IMAGE_MODEL,
-                            )
-                            image_prompt = gr.Textbox(
-                                label="图片分析提示词",
-                                value=DEFAULT_IMAGE_PROMPT,
-                                lines=4,
-                            )
-                            image_btn = gr.Button("开始图片分析", variant="primary")
+                with gr.Tab("图片行为分析"), gr.Row():
+                    with gr.Column(scale=1):
+                        image_input = gr.Image(
+                            type="filepath",
+                            label="上传待分析图片",
+                        )
+                        conf_threshold = gr.Slider(
+                            minimum=0.1,
+                            maximum=0.9,
+                            value=0.25,
+                            step=0.05,
+                            label="置信度阈值",
+                        )
+                        iou_threshold = gr.Slider(
+                            minimum=0.1,
+                            maximum=0.9,
+                            value=0.45,
+                            step=0.05,
+                            label="NMS IoU 阈值",
+                        )
+                        max_det = gr.Slider(
+                            minimum=1,
+                            maximum=50,
+                            value=20,
+                            step=1,
+                            label="最多保留目标数",
+                        )
+                        device = gr.Dropdown(
+                            label="YOLO 推理设备",
+                            choices=["", "cpu", "cuda:0", "cuda:1"],
+                            value="",
+                            allow_custom_value=True,
+                            info="留空自动检测，可选 cpu / cuda:0 等",
+                        )
+                        image_model_name = gr.Textbox(
+                            label="图片分析模型名",
+                            value=DEFAULT_IMAGE_MODEL,
+                        )
+                        image_prompt = gr.Textbox(
+                            label="图片分析提示词",
+                            value=DEFAULT_IMAGE_PROMPT,
+                            lines=4,
+                        )
+                        image_btn = gr.Button("开始图片分析", variant="primary")
 
-                        with gr.Column(scale=1):
-                            image_output = gr.Image(label="YOLO 标注结果")
-                            detection_table = gr.Dataframe(
-                                headers=["序号", "类别", "置信度", "边界框"],
-                                datatype=["number", "str", "number", "str"],
-                                row_count=1,
-                                label="检测详情",
-                            )
-                            detection_summary = gr.Textbox(
-                                label="检测摘要",
-                                lines=2,
-                            )
-                            image_report = gr.Textbox(
-                                label="Qwen 行为分析报告",
-                                lines=12,
-                            )
-                            image_logs = gr.Textbox(
-                                label="本会话日志",
-                                lines=12,
-                                value="暂无本会话日志。",
-                            )
+                    with gr.Column(scale=1):
+                        image_output = gr.Image(label="YOLO 标注结果")
+                        detection_table = gr.Dataframe(
+                            headers=["序号", "类别", "置信度", "边界框"],
+                            datatype=["number", "str", "number", "str"],
+                            row_count=1,
+                            label="检测详情",
+                        )
+                        detection_summary = gr.Textbox(
+                            label="检测摘要",
+                            lines=2,
+                        )
+                        image_report = gr.Textbox(
+                            label="Qwen 行为分析报告",
+                            lines=12,
+                        )
+                        image_logs = gr.Textbox(
+                            label="本会话日志",
+                            lines=12,
+                            value="暂无本会话日志。",
+                        )
 
-                with gr.Tab("音频叫声分析"):
-                    with gr.Row():
-                        with gr.Column(scale=1):
-                            audio_input = gr.Audio(
-                                type="filepath",
-                                sources=["upload", "microphone"],
-                                label="上传预先准备好的猫叫声音频",
-                            )
-                            audio_asr_model_name = gr.Textbox(
-                                label="音频识别模型名（猫叫分析不使用ASR）",
-                                value=DEFAULT_AUDIO_ASR_MODEL,
-                            )
-                            audio_reasoning_model_name = gr.Textbox(
-                                label="猫叫情绪分析模型名",
-                                value=DEFAULT_AUDIO_REASONING_MODEL,
-                            )
-                            audio_prompt = gr.Textbox(
-                                label="音频分析提示词",
-                                value=DEFAULT_AUDIO_PROMPT,
-                                lines=4,
-                            )
-                            audio_btn = gr.Button("开始音频分析", variant="primary")
+                with gr.Tab("音频叫声分析"), gr.Row():
+                    with gr.Column(scale=1):
+                        audio_input = gr.Audio(
+                            type="filepath",
+                            sources=["upload", "microphone"],
+                            label="上传预先准备好的猫叫声音频",
+                        )
+                        audio_asr_model_name = gr.Textbox(
+                            label="音频识别模型名（猫叫分析不使用ASR）",
+                            value=DEFAULT_AUDIO_ASR_MODEL,
+                        )
+                        audio_reasoning_model_name = gr.Textbox(
+                            label="猫叫情绪分析模型名",
+                            value=DEFAULT_AUDIO_REASONING_MODEL,
+                        )
+                        audio_prompt = gr.Textbox(
+                            label="音频分析提示词",
+                            value=DEFAULT_AUDIO_PROMPT,
+                            lines=4,
+                        )
+                        audio_btn = gr.Button("开始音频分析", variant="primary")
 
-                        with gr.Column(scale=1):
-                            audio_metadata = gr.Textbox(
-                                label="音频元信息",
-                                lines=8,
-                            )
-                            audio_report = gr.Textbox(
-                                label="Qwen 猫叫情绪分析报告",
-                                lines=12,
-                            )
-                            audio_records = gr.Dataframe(
-                                headers=["序号", "上传时间", "文件名", "大小KB"],
-                                datatype=["number", "str", "str", "number"],
-                                row_count=1,
-                                label="本会话音频记录",
-                            )
-                            audio_logs = gr.Textbox(
-                                label="本会话日志",
-                                lines=12,
-                                value="暂无本会话日志。",
-                            )
+                    with gr.Column(scale=1):
+                        audio_metadata = gr.Textbox(
+                            label="音频元信息",
+                            lines=8,
+                        )
+                        audio_report = gr.Textbox(
+                            label="Qwen 猫叫情绪分析报告",
+                            lines=12,
+                        )
+                        audio_records = gr.Dataframe(
+                            headers=["序号", "上传时间", "文件名", "大小KB"],
+                            datatype=["number", "str", "str", "number"],
+                            row_count=1,
+                            label="本会话音频记录",
+                        )
+                        audio_logs = gr.Textbox(
+                            label="本会话日志",
+                            lines=12,
+                            value="暂无本会话日志。",
+                        )
 
                 with gr.Tab("CH340 硬件收发测试"):
                     with gr.Row():
