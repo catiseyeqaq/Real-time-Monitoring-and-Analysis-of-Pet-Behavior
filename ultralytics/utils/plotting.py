@@ -217,7 +217,15 @@ class Annotator:
             if non_ascii:
                 # Try multiple CJK-capable fonts so corrupted Arial.Unicode.ttf does not force a fallback to ASCII-only text.
                 # Note: use actual Windows font filenames (e.g. C:\Windows\Fonts\simhei.ttf, msyh.ttc, simsun.ttc).
-                font_candidates = ["Arial.Unicode.ttf", "simhei.ttf", "msyh.ttc", "msyhbd.ttc", "simsun.ttc", "SimsunExtG.ttf", font]
+                font_candidates = [
+                    "Arial.Unicode.ttf",
+                    "simhei.ttf",
+                    "msyh.ttc",
+                    "msyhbd.ttc",
+                    "simsun.ttc",
+                    "SimsunExtG.ttf",
+                    font,
+                ]
 
             self.font = None
             for font_name in dict.fromkeys(font_candidates):
@@ -620,8 +628,8 @@ def plot_labels(boxes, cls, names=(), save_dir=Path(""), on_plot=None):
     ax[3].hist2d(x["width"], x["height"], bins=50, cmap=subplot_3_4_color)
     ax[3].set_xlabel("width")
     ax[3].set_ylabel("height")
-    for a in {0, 1, 2, 3}:
-        for s in {"top", "right", "left", "bottom"}:
+    for a in (0, 1, 2, 3):
+        for s in ("top", "right", "left", "bottom"):
             ax[a].spines[s].set_visible(False)
 
     fname = save_dir / "labels.jpg"
@@ -726,7 +734,7 @@ def plot_images(
         - 3 channels: Used as-is (standard RGB)
         - 4+ channels: Cropped to first 3 channels
     """
-    for k in {"cls", "bboxes", "conf", "masks", "keypoints", "batch_idx", "images"}:
+    for k in ("cls", "bboxes", "conf", "masks", "keypoints", "batch_idx", "images"):
         if k not in labels:
             continue
         if k == "cls" and labels[k].ndim == 2:
@@ -1049,7 +1057,7 @@ def feature_visualization(x, module_type: str, stage: int, n: int = 32, save_dir
     """
     import matplotlib.pyplot as plt  # scope for faster 'import ultralytics'
 
-    for m in {"Detect", "Segment", "Pose", "Classify", "OBB", "RTDETRDecoder"}:  # all model heads
+    for m in ("Detect", "Segment", "Pose", "Classify", "OBB", "RTDETRDecoder"):  # all model heads
         if m in module_type:
             return
     if isinstance(x, torch.Tensor):

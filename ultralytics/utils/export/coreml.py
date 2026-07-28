@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any
 
 import torch
-import torch.nn as nn
+from torch import nn
 
 from ultralytics.utils import LOGGER
 from ultralytics.utils.checks import check_requirements
