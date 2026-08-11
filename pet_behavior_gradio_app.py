@@ -23,7 +23,7 @@ from pathlib import Path
 import gradio as gr
 import numpy as np
 from PIL import Image
-from ultralytics import YOLO
+from ultralytics import YOLO as BehaviorModel
 
 try:
     import serial
@@ -38,8 +38,8 @@ except ImportError:
 APP_TITLE = "智能宠物行为识别演示系统"
 ROOT_DIR = Path(__file__).resolve().parent
 DEFAULT_WEIGHT_CANDIDATES = [
-    ROOT_DIR / "runs" / "train" / "cat_behavior_yolo26n" / "weights" / "best.pt",
-    ROOT_DIR / "runs" / "train" / "yolo-GDL" / "weights" / "best.pt",
+    ROOT_DIR / "runs" / "train" / "pet_behavior" / "weights" / "best.pt",
+    ROOT_DIR / "runs" / "train" / "pet_behavior" / "weights" / "best.pt",
 ]
 DEFAULT_WEIGHT = next(
     (weight_path for weight_path in DEFAULT_WEIGHT_CANDIDATES if weight_path.exists()),
@@ -321,7 +321,7 @@ class ModelManager:
         self._model = None
         self._lock = threading.Lock()
 
-    def get_model(self) -> YOLO:
+    def get_model(self) -> BehaviorModel:
         if self._model is None:
             with self._lock:
                 if self._model is None:
@@ -331,7 +331,7 @@ class ModelManager:
                             f"请先使用 train.py 训练模型，或通过 --weight 参数指定正确的权重路径。"
                         )
                     push_log(f"开始加载本地行为模型: {self.weight_path}")
-                    self._model = YOLO(str(self.weight_path))
+                    self._model = BehaviorModel(str(self.weight_path))
                     push_log("本地行为模型加载完成")
         return self._model
 
@@ -1166,7 +1166,7 @@ def format_detection_summary(detections: list[dict]) -> str:
     return f"检测到 {len(detections)} 个目标：{stats}。"
 
 
-def run_yolo_detection(
+def run_behavior_detection(
     image_path: str,
     conf_threshold: float,
     iou_threshold: float,
@@ -1262,7 +1262,7 @@ def analyze_image(
             int(servo_angle),
             client_state,
         )
-        annotated, rows, detections, summary = run_yolo_detection(
+        annotated, rows, detections, summary = run_behavior_detection(
             image_path=image_path,
             conf_threshold=conf_threshold,
             iou_threshold=iou_threshold,
