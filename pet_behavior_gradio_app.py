@@ -50,7 +50,7 @@ DEFAULT_IMAGE_MODEL = "qwen3.5-flash"
 DEFAULT_AUDIO_ASR_MODEL = "不使用ASR"
 DEFAULT_AUDIO_REASONING_MODEL = "qwen3.5-omni-plus"
 DEFAULT_IMAGE_PROMPT = (
-    "你是本地宠物问答助手。请结合图片内容和YOLO检测结果，简短判断猫咪当前行为，"
+    "你是本地宠物问答助手。请结合图片内容和本地行为检测结果，简短判断猫咪当前行为，"
     "说明可能的健康风险，并给出饲养建议。不要输出置信度依据。请使用中文分点输出。"
 )
 DEFAULT_AUDIO_PROMPT = (
@@ -327,12 +327,12 @@ class ModelManager:
                 if self._model is None:
                     if not self.weight_path.exists():
                         raise FileNotFoundError(
-                            f"YOLO权重文件不存在: {self.weight_path}\n"
+                            f"本地行为模型文件不存在: {self.weight_path}\n"
                             f"请先使用 train.py 训练模型，或通过 --weight 参数指定正确的权重路径。"
                         )
-                    push_log(f"开始加载YOLO权重: {self.weight_path}")
+                    push_log(f"开始加载本地行为模型: {self.weight_path}")
                     self._model = YOLO(str(self.weight_path))
-                    push_log("YOLO权重加载完成")
+                    push_log("本地行为模型加载完成")
         return self._model
 
 
@@ -513,7 +513,7 @@ def _start_frpc_tunnel(local_port: int) -> subprocess.Popen | None:
 
 def list_serial_ports() -> tuple[list[str], str]:
     if not SERIAL_AVAILABLE:
-        return [], "pyserial 未安装，请先在 yolo 环境中安装 pyserial。"
+        return [], "pyserial 未安装，请先在项目环境中安装 pyserial。"
     ports = list(serial.tools.list_ports.comports())
     choices = [port.device for port in ports]
     lines = [f"{port.device} | {port.description} | hwid={port.hwid}" for port in ports]
@@ -774,7 +774,7 @@ def build_local_detection_alert(detections: list[dict], client_state: dict) -> s
     if not detection_has_vomit(detections):
         return ""
 
-    detail = "YOLO 检测到猫呕吐行为，请立即检查宠物状态并清理现场。"
+    detail = "本地行为检测发现猫咪可能出现呕吐行为，请立即检查宠物状态并清理现场。"
     add_alarm_record(client_state, "vomit", detail, "error")
     client_log(client_state, detail, "error")
     return f"\n\n本地报警：{detail}"
@@ -1176,7 +1176,7 @@ def run_yolo_detection(
     start = time.perf_counter()
     model = MODEL_MANAGER.get_model()
     push_log(
-        f"开始YOLO推理 | image={image_path} | conf={conf_threshold:.2f} | "
+        f"开始本地行为检测 | image={image_path} | conf={conf_threshold:.2f} | "
         f"iou={iou_threshold:.2f} | max_det={max_det} | device='{device or 'auto'}'"
     )
     results = model.predict(
@@ -1211,7 +1211,7 @@ def run_yolo_detection(
         rows.append([idx, label, round(conf, 4), str(xyxy)])
 
     summary = format_detection_summary(detections)
-    push_log(f"YOLO推理完成 | det_count={len(detections)} | cost_ms={elapsed:.2f} | summary={summary}")
+    push_log(f"本地行为检测完成 | det_count={len(detections)} | cost_ms={elapsed:.2f} | summary={summary}")
     return annotated, rows, detections, summary
 
 
@@ -1272,15 +1272,15 @@ def analyze_image(
         local_alert = build_local_detection_alert(detections, client_state)
         api_key = resolve_api_key(api_key_input)
         if not api_key:
-            client_state = client_log(client_state, "未提供API Key，跳过Qwen分析，仅返回YOLO检测结果", "warning")
-            report = "未提供API Key，当前仅展示YOLO检测结果。填写 API Key 后可继续调用 Qwen 分析。" + local_alert
+            client_state = client_log(client_state, "未提供API Key，跳过Qwen分析，仅返回本地行为检测结果", "warning")
+            report = "未提供API Key，当前仅展示本地行为检测结果。填写 API Key 后可继续调用 Qwen 分析。" + local_alert
             return annotated, rows, summary, env_status, report, get_client_logs(client_state), client_state
 
         qwen_image_path, image_compress_info = prepare_image_for_qwen(image_path)
         context_text = (
             f"图片文件: {Path(image_path).name}\n"
-            f"YOLO摘要: {summary}\n"
-            f"YOLO详情: {json.dumps(detections, ensure_ascii=False)}\n"
+            f"本地行为摘要: {summary}\n"
+            f"行为检测详情: {json.dumps(detections, ensure_ascii=False)}\n"
             f"发送给Qwen前的图片压缩信息: {json.dumps(image_compress_info, ensure_ascii=False)}"
         )
         try:
@@ -1419,7 +1419,7 @@ def build_demo() -> gr.Blocks:
                 本系统提供两种猫咪行为分析能力：
 
                 **1. 图片行为分析**
-                - 上传猫咪照片，系统先使用 **YOLO 目标检测** 识别猫咪行为类别
+                - 上传猫咪照片，系统先使用本地行为检测模型识别猫咪行为类别
                   （猫喝水、猫进食、猫玩耍、猫睡觉、猫呕吐、猫如厕）
                 - 再将检测结果与图片一起发送给 **阿里云通义千问 (Qwen)** 多模态大模型
                 - Qwen 会综合判断猫咪行为、评估健康风险，并给出养护建议
@@ -1433,12 +1433,12 @@ def build_demo() -> gr.Blocks:
                 ### 重要提示
 
                 - 本系统依赖 **阿里云 DashScope API**，需要有效的 API Key 才能使用 AI 分析功能
-                - 如不填写 API Key，仅能查看基础的 YOLO 检测 / 音频元信息结果
-                - API Key 仅保存在当前会话内存中，关闭页面后不会留存
+                - 如不填写 API Key，仍可查看基础的行为检测 / 音频元信息结果
+                - API Key 会保存到本地 SQLite，仅适合本机 Demo，不适合直接暴露到公网
 
                 **获取 API Key：** 访问 [阿里云百炼平台](https://bailian.console.aliyun.com/) 开通 DashScope 服务即可获取
 
-                > **安全提示：** API Key 仅保存在当前浏览器会话内存中，关闭页面后自动清除。建议单独申请专用子 Key 并设置额度限制，避免使用高权限主 Key。
+                > **安全提示：** API Key 会保存在本地 SQLite；建议使用专用子 Key 并设置额度限制，避免把高权限主 Key 暴露给公网。
 
                 ---
                 """,
@@ -1474,7 +1474,7 @@ def build_demo() -> gr.Blocks:
                 f"""
                 # {APP_TITLE}
                 支持两类演示流程：
-                1. 上传猫咪图片，先做 YOLO 目标检测，再把图片和检测结果交给 Qwen 做语义分析。
+                1. 上传猫咪图片，先做本地行为检测，再把图片和检测结果交给 Qwen 做语义分析。
                 2. 上传预先准备好的猫叫声音频，提取元信息后直接交给 Qwen Omni 做猫叫情绪分类。
 
                 后台终端会打印详细日志，页面中也会同步显示最近日志，方便调试。
@@ -1545,7 +1545,7 @@ def build_demo() -> gr.Blocks:
                                 label="最多保留目标数",
                             )
                             device = gr.Dropdown(
-                                label="YOLO 推理设备",
+                                label="视觉推理设备",
                                 choices=["", "cpu", "cuda:0", "cuda:1"],
                                 value="",
                                 allow_custom_value=True,
@@ -1563,7 +1563,7 @@ def build_demo() -> gr.Blocks:
                             image_btn = gr.Button("开始图片分析", variant="primary")
 
                         with gr.Column(scale=1):
-                            image_output = gr.Image(label="YOLO 标注结果")
+                            image_output = gr.Image(label="行为标注结果")
                             detection_table = gr.Dataframe(
                                 headers=["序号", "类别", "置信度", "边界框"],
                                 datatype=["number", "str", "number", "str"],
@@ -1899,7 +1899,7 @@ def build_demo() -> gr.Blocks:
             if saved_key:
                 push_log(f"本地用户 {username} 已登录，已载入 API Key")
             else:
-                push_log(f"本地用户 {username} 已登录，未配置 API Key，进入本地 YOLO/硬件联动模式")
+                push_log(f"本地用户 {username} 已登录，未配置 API Key，进入本地行为/硬件联动模式")
             return (
                 gr.update(visible=False),
                 gr.update(visible=True),
@@ -1954,7 +1954,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--weight",
         default=str(DEFAULT_WEIGHT),
-        help="YOLO权重路径",
+        help="本地行为模型权重路径",
     )
     return parser.parse_args()
 
