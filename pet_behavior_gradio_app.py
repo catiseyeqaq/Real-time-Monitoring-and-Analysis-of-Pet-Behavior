@@ -758,14 +758,6 @@ def run_yolo_detection(
         verbose=False,
         device=device or None,
     )
-    results = model.predict(
-        source=image_path,
-        conf=conf_threshold,
-        iou=iou_threshold,
-        imgsz=640,
-        max_det=max_det,
-        verbose=False,
-    )
     elapsed = (time.perf_counter() - start) * 1000
     result = results[0]
     annotated = result.plot()
@@ -952,7 +944,9 @@ def analyze_audio(
 def build_demo() -> gr.Blocks:
     with gr.Blocks(title=APP_TITLE) as demo:
         shared_key = gr.State(value="")
-        client_state = gr.State(value=new_client_state())
+        # 初始值必须为 None 而非共享字典：可变默认值会在所有浏览器会话间共享，
+        # 导致跨用户数据串扰；各回调已通过 state or new_client_state() 做惰性初始化。
+        client_state = gr.State(value=None)
 
         # ======================== 欢迎弹窗 ========================
         with gr.Column(visible=True, elem_classes=["welcome-container"]) as welcome_section:

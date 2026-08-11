@@ -7,7 +7,8 @@ numpy>=1.24.0
 Pillow>=10.0.0
 
 # Gradio Web UI
-gradio>=4.0.0
+# Gradio 6.0 移除了 gr.update 等 API，本项目按 Gradio 4/5 接口编写，故锁定版本范围
+gradio>=4.44.0,<6.0
 
 # Serial communication (optional, for ESP32 hardware)
 pyserial>=3.5
