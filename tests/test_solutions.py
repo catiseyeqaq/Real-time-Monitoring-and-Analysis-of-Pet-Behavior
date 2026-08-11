@@ -353,9 +353,11 @@ def test_display_output_method():
     counter = solutions.ObjectCounter(show=True)
     counter.env_check = True
     frame = np.zeros((100, 100, 3), dtype=np.uint8)
-    with patch("cv2.imshow") as mock_imshow, patch("cv2.waitKey", return_value=ord("q")) as mock_wait, patch(
-        "cv2.destroyAllWindows"
-    ) as mock_destroy:
+    with (
+        patch("cv2.imshow") as mock_imshow,
+        patch("cv2.waitKey", return_value=ord("q")) as mock_wait,
+        patch("cv2.destroyAllWindows") as mock_destroy,
+    ):
         counter.display_output(frame)
         mock_imshow.assert_called_once()
         mock_wait.assert_called_once()

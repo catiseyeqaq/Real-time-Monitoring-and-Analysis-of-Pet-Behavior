@@ -5,9 +5,7 @@ from __future__ import annotations
 
 import os
 import subprocess
-import sys
 from pathlib import Path
-
 
 ENV_NAME = os.environ.get("PET_BEHAVIOR_ENV", "petbehavior")
 PYTHON_VERSION = "3.12"

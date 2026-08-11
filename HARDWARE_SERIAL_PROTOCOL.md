@@ -4,18 +4,18 @@
 
 ## 串口参数
 
-| 参数 | 默认值 |
-|---|---:|
-| 串口芯片 | CH340 / CH341 |
+| 参数         |                默认值 |
+| ------------ | --------------------: |
+| 串口芯片     |         CH340 / CH341 |
 | Windows 端口 | 页面选择，例如 `COM3` |
-| 波特率 | `115200` |
-| 数据位 | `8` |
-| 校验位 | `None` |
-| 停止位 | `1` |
-| 流控 | 无 |
-| 编码 | UTF-8 文本 |
-| 帧结束 | `\n` |
-| 默认读取等待 | `0.5s` |
+| 波特率       |              `115200` |
+| 数据位       |                   `8` |
+| 校验位       |                `None` |
+| 停止位       |                   `1` |
+| 流控         |                    无 |
+| 编码         |            UTF-8 文本 |
+| 帧结束       |                  `\n` |
+| 默认读取等待 |                `0.5s` |
 
 开发板建议按“收到一行 JSON 后解析并返回一行 JSON”的方式实现。
 
@@ -26,13 +26,13 @@
 上位机发送：
 
 ```json
-{"cmd":"ping"}
+{ "cmd": "ping" }
 ```
 
 下位机建议返回：
 
 ```json
-{"ok":true,"cmd":"ping","message":"pong"}
+{ "ok": true, "cmd": "ping", "message": "pong" }
 ```
 
 ### 2. 温度读取
@@ -40,13 +40,13 @@
 上位机发送：
 
 ```json
-{"cmd":"temperature","action":"read"}
+{ "cmd": "temperature", "action": "read" }
 ```
 
 下位机建议返回：
 
 ```json
-{"ok":true,"cmd":"temperature","temperature_c":22.0}
+{ "ok": true, "cmd": "temperature", "temperature_c": 22.0 }
 ```
 
 上位机可解析字段：`temperature`、`temperature_c`、`temp`、`value`。
@@ -56,13 +56,13 @@
 上位机发送：
 
 ```json
-{"cmd":"humidity","action":"read"}
+{ "cmd": "humidity", "action": "read" }
 ```
 
 下位机建议返回：
 
 ```json
-{"ok":true,"cmd":"humidity","humidity_percent":45.0}
+{ "ok": true, "cmd": "humidity", "humidity_percent": 45.0 }
 ```
 
 上位机可解析字段：`humidity`、`humidity_percent`、`humidity_rh`、`rh`、`value`。
@@ -74,13 +74,13 @@
 上位机发送：
 
 ```json
-{"cmd":"weight","action":"read"}
+{ "cmd": "weight", "action": "read" }
 ```
 
 下位机建议返回：
 
 ```json
-{"ok":true,"cmd":"weight","weight_kg":5.0}
+{ "ok": true, "cmd": "weight", "weight_kg": 5.0 }
 ```
 
 上位机可解析字段：`weight`、`weight_kg`、`kg`、`value`。
@@ -92,21 +92,21 @@
 上位机发送：
 
 ```json
-{"cmd":"servo","id":1,"angle":90}
+{ "cmd": "servo", "id": 1, "angle": 90 }
 ```
 
 字段说明：
 
-| 字段 | 类型 | 说明 |
-|---|---|---|
-| `cmd` | string | 固定为 `servo` |
-| `id` | int | 舵机编号 |
-| `angle` | int | 舵机角度，页面范围 `0 - 180` |
+| 字段    | 类型   | 说明                         |
+| ------- | ------ | ---------------------------- |
+| `cmd`   | string | 固定为 `servo`               |
+| `id`    | int    | 舵机编号                     |
+| `angle` | int    | 舵机角度，页面范围 `0 - 180` |
 
 下位机建议返回：
 
 ```json
-{"ok":true,"cmd":"servo","id":1,"angle":90}
+{ "ok": true, "cmd": "servo", "id": 1, "angle": 90 }
 ```
 
 ### 6. 温度报警
@@ -114,13 +114,13 @@
 温度超过页面阈值时，上位机发送：
 
 ```json
-{"cmd":"alarm","level":"high"}
+{ "cmd": "alarm", "level": "high" }
 ```
 
 下位机建议返回：
 
 ```json
-{"ok":true,"cmd":"alarm","level":"high"}
+{ "ok": true, "cmd": "alarm", "level": "high" }
 ```
 
 ## 图片识别后的环境显示
@@ -152,13 +152,13 @@
 
 默认参数：
 
-| 参数 | 默认值 |
-|---|---:|
-| 单轮投放上限 | `5.0 kg` |
-| 吃食触发重量下降 | `0.02 kg` |
-| 温度报警阈值 | `35.0 °C` |
-| 自动投放控制码 | `{"cmd":"servo","id":1,"angle":90}` |
-| 报警控制码 | `{"cmd":"alarm","level":"high"}` |
+| 参数             |                              默认值 |
+| ---------------- | ----------------------------------: |
+| 单轮投放上限     |                            `5.0 kg` |
+| 吃食触发重量下降 |                           `0.02 kg` |
+| 温度报警阈值     |                           `35.0 °C` |
+| 自动投放控制码   | `{"cmd":"servo","id":1,"angle":90}` |
+| 报警控制码       |    `{"cmd":"alarm","level":"high"}` |
 
 联动顺序：
 

@@ -349,21 +349,23 @@ def safe_download(
                             if i == 0 and expected_size > 1048576:
                                 check_disk_space(expected_size, path=f.parent)
                             buffer_size = max(8192, min(1048576, expected_size // 1000)) if expected_size else 8192
-                            with TQDM(
-                                total=expected_size,
-                                desc=desc,
-                                disable=not progress,
-                                unit="B",
-                                unit_scale=True,
-                                unit_divisor=1024,
-                            ) as pbar:
-                                with open(f, "wb") as f_opened:
-                                    while True:
-                                        data = response.read(buffer_size)
-                                        if not data:
-                                            break
-                                        f_opened.write(data)
-                                        pbar.update(len(data))
+                            with (
+                                TQDM(
+                                    total=expected_size,
+                                    desc=desc,
+                                    disable=not progress,
+                                    unit="B",
+                                    unit_scale=True,
+                                    unit_divisor=1024,
+                                ) as pbar,
+                                open(f, "wb") as f_opened,
+                            ):
+                                while True:
+                                    data = response.read(buffer_size)
+                                    if not data:
+                                        break
+                                    f_opened.write(data)
+                                    pbar.update(len(data))
 
                     if f.exists():
                         file_size = f.stat().st_size

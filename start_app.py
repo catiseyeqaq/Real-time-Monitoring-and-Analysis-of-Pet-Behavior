@@ -5,12 +5,10 @@ from __future__ import annotations
 
 import os
 import subprocess
-import sys
 import threading
 import time
 import webbrowser
 from pathlib import Path
-
 
 ENV_NAME = os.environ.get("PET_BEHAVIOR_ENV", "petbehavior")
 ROOT_DIR = Path(__file__).resolve().parent
@@ -20,7 +18,9 @@ DEFAULT_WEIGHT = ROOT_DIR / "runs" / "train" / "pet_behavior" / "weights" / "bes
 
 def environment_exists() -> bool:
     result = subprocess.run(["conda", "env", "list"], capture_output=True, text=True)
-    return result.returncode == 0 and any(line.split() and line.split()[0] == ENV_NAME for line in result.stdout.splitlines())
+    return result.returncode == 0 and any(
+        line.split() and line.split()[0] == ENV_NAME for line in result.stdout.splitlines()
+    )
 
 
 def main() -> None:

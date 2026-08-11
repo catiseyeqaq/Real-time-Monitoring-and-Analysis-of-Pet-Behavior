@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import argparse
 import atexit
 import base64
@@ -10,7 +12,6 @@ import shutil
 import socket
 import sqlite3
 import subprocess
-import tempfile
 import threading
 import time
 import urllib.error
@@ -23,6 +24,7 @@ from pathlib import Path
 import gradio as gr
 import numpy as np
 from PIL import Image
+
 from ultralytics import YOLO as BehaviorModel
 
 try:
@@ -548,13 +550,13 @@ def send_ch340_packet(
 
     tx = data + ("\n" if append_newline else "")
     try:
-        with serial.Serial(port=port, baudrate=int(baudrate), timeout=max(read_wait, 0.1)) as ser:
-            ser.reset_input_buffer()
-            ser.write(tx.encode("utf-8"))
-            ser.flush()
+        with serial.Serial(port=port, baudrate=int(baudrate), timeout=max(read_wait, 0.1)) as set:
+            set.reset_input_buffer()
+            set.write(tx.encode("utf-8"))
+            set.flush()
             time.sleep(max(read_wait, 0.0))
-            waiting = ser.in_waiting
-            raw = ser.read(waiting or 256)
+            waiting = set.in_waiting
+            raw = set.read(waiting or 256)
         rx = raw.decode("utf-8", errors="replace").strip() if raw else ""
         result = f"TX ({port} @ {baudrate}): {data}\nRX: {rx or '<无返回>'}"
         client_state = client_log(client_state, f"CH340 发包完成 | port={port} | tx={data} | rx={rx or '<empty>'}")
@@ -581,12 +583,12 @@ def exchange_ch340_packet(
         raise ValueError("发送包不能为空。")
 
     tx = data + ("\n" if append_newline else "")
-    with serial.Serial(port=port, baudrate=int(baudrate), timeout=max(read_wait, 0.1)) as ser:
-        ser.reset_input_buffer()
-        ser.write(tx.encode("utf-8"))
-        ser.flush()
+    with serial.Serial(port=port, baudrate=int(baudrate), timeout=max(read_wait, 0.1)) as set:
+        set.reset_input_buffer()
+        set.write(tx.encode("utf-8"))
+        set.flush()
         time.sleep(max(read_wait, 0.0))
-        raw = ser.read(ser.in_waiting or 256)
+        raw = set.read(set.in_waiting or 256)
     return raw.decode("utf-8", errors="replace").strip() if raw else ""
 
 
@@ -827,14 +829,18 @@ def local_feeding_control_cycle(
                 read_wait,
             )
             events.append(f"湿度传感器返回: {raw_humidity or '<无返回>'}")
-            humidity_percent = parse_sensor_value(raw_humidity, ("humidity", "humidity_percent", "humidity_rh", "rh", "value"))
+            humidity_percent = parse_sensor_value(
+                raw_humidity, ("humidity", "humidity_percent", "humidity_rh", "rh", "value")
+            )
 
         if weight_kg is None:
             raise RuntimeError("未能解析重量值，请确认 CH340 返回 JSON 中包含 weight/weight_kg/kg/value。")
         if temperature_c is None:
             raise RuntimeError("未能解析温度值，请确认 CH340 返回 JSON 中包含 temperature/temperature_c/temp/value。")
         if humidity_percent is None:
-            raise RuntimeError("未能解析湿度值，请确认 CH340 返回 JSON 中包含 humidity/humidity_percent/humidity_rh/rh/value。")
+            raise RuntimeError(
+                "未能解析湿度值，请确认 CH340 返回 JSON 中包含 humidity/humidity_percent/humidity_rh/rh/value。"
+            )
 
         previous_weight = client_state.get("last_food_weight_kg")
         dispensed_total = float(client_state.get("dispensed_total_kg") or 0.0)
@@ -873,7 +879,12 @@ def local_feeding_control_cycle(
             )
             add_alarm_record(client_state, "feeding_limit", detail, "warning")
             client_state = client_log(client_state, detail, "warning")
-            return "\n".join(events + [detail]), format_alarm_records(client_state), get_client_logs(client_state), client_state
+            return (
+                "\n".join([*events, detail]),
+                format_alarm_records(client_state),
+                get_client_logs(client_state),
+                client_state,
+            )
 
         rx = exchange_ch340_packet(port, int(baudrate), servo_packet, read_wait)
         client_state["dispensed_total_kg"] = projected_total
@@ -885,7 +896,12 @@ def local_feeding_control_cycle(
         detail = f"本地联动失败: {exc}"
         add_alarm_record(client_state, "hardware", detail, "error")
         client_state = client_log(client_state, detail, "error")
-        return "\n".join(events + [detail]), format_alarm_records(client_state), get_client_logs(client_state), client_state
+        return (
+            "\n".join([*events, detail]),
+            format_alarm_records(client_state),
+            get_client_logs(client_state),
+            client_state,
+        )
 
 
 def reset_feeding_session(client_state: dict | None) -> tuple[str, list[list], str, dict]:
@@ -893,7 +909,12 @@ def reset_feeding_session(client_state: dict | None) -> tuple[str, list[list], s
     client_state.pop("last_food_weight_kg", None)
     client_state["dispensed_total_kg"] = 0.0
     client_state = client_log(client_state, "已重置本轮投喂统计")
-    return "已重置：下次联动检测会重新记录初始重量。", format_alarm_records(client_state), get_client_logs(client_state), client_state
+    return (
+        "已重置：下次联动检测会重新记录初始重量。",
+        format_alarm_records(client_state),
+        get_client_logs(client_state),
+        client_state,
+    )
 
 
 def image_file_to_data_uri(file_path: str) -> str:
@@ -1515,130 +1536,128 @@ def build_demo() -> gr.Blocks:
                 )
 
             with gr.Tabs():
-                with gr.Tab("图片行为分析"):
-                    with gr.Row():
-                        with gr.Column(scale=1):
-                            image_input = gr.Image(
-                                type="filepath",
-                                sources=["upload", "webcam"],
-                                label="本地摄像头 / 上传图片检测",
-                            )
-                            conf_threshold = gr.Slider(
-                                minimum=0.1,
-                                maximum=0.9,
-                                value=0.25,
-                                step=0.05,
-                                label="置信度阈值",
-                            )
-                            iou_threshold = gr.Slider(
-                                minimum=0.1,
-                                maximum=0.9,
-                                value=0.45,
-                                step=0.05,
-                                label="NMS IoU 阈值",
-                            )
-                            max_det = gr.Slider(
-                                minimum=1,
-                                maximum=50,
-                                value=20,
-                                step=1,
-                                label="最多保留目标数",
-                            )
-                            device = gr.Dropdown(
-                                label="视觉推理设备",
-                                choices=["", "cpu", "cuda:0", "cuda:1"],
-                                value="",
-                                allow_custom_value=True,
-                                info="留空自动检测，可选 cpu / cuda:0 等",
-                            )
-                            image_model_name = gr.Textbox(
-                                label="图片分析模型名",
-                                value=DEFAULT_IMAGE_MODEL,
-                            )
-                            image_prompt = gr.Textbox(
-                                label="图片分析提示词",
-                                value=DEFAULT_IMAGE_PROMPT,
-                                lines=4,
-                            )
-                            image_btn = gr.Button("开始图片分析", variant="primary")
+                with gr.Tab("图片行为分析"), gr.Row():
+                    with gr.Column(scale=1):
+                        image_input = gr.Image(
+                            type="filepath",
+                            sources=["upload", "webcam"],
+                            label="本地摄像头 / 上传图片检测",
+                        )
+                        conf_threshold = gr.Slider(
+                            minimum=0.1,
+                            maximum=0.9,
+                            value=0.25,
+                            step=0.05,
+                            label="置信度阈值",
+                        )
+                        iou_threshold = gr.Slider(
+                            minimum=0.1,
+                            maximum=0.9,
+                            value=0.45,
+                            step=0.05,
+                            label="NMS IoU 阈值",
+                        )
+                        max_det = gr.Slider(
+                            minimum=1,
+                            maximum=50,
+                            value=20,
+                            step=1,
+                            label="最多保留目标数",
+                        )
+                        device = gr.Dropdown(
+                            label="视觉推理设备",
+                            choices=["", "cpu", "cuda:0", "cuda:1"],
+                            value="",
+                            allow_custom_value=True,
+                            info="留空自动检测，可选 cpu / cuda:0 等",
+                        )
+                        image_model_name = gr.Textbox(
+                            label="图片分析模型名",
+                            value=DEFAULT_IMAGE_MODEL,
+                        )
+                        image_prompt = gr.Textbox(
+                            label="图片分析提示词",
+                            value=DEFAULT_IMAGE_PROMPT,
+                            lines=4,
+                        )
+                        image_btn = gr.Button("开始图片分析", variant="primary")
 
-                        with gr.Column(scale=1):
-                            image_output = gr.Image(label="行为标注结果")
-                            detection_table = gr.Dataframe(
-                                headers=["序号", "类别", "置信度", "边界框"],
-                                datatype=["number", "str", "number", "str"],
-                                row_count=1,
-                                label="检测详情",
-                            )
-                            detection_summary = gr.Textbox(
-                                label="检测摘要",
-                                lines=2,
-                            )
-                            environment_status = gr.Textbox(
-                                label="当前环境与喂食器状态",
-                                lines=8,
-                                value=(
-                                    f"当前温度: {SIMULATED_NORTHEAST_TEMPERATURE_C:.1f} °C\n"
-                                    f"当前湿度: {SIMULATED_NORTHEAST_HUMIDITY_PERCENT:.1f} %RH\n"
-                                    f"喂食器食物重量: {SIMULATED_FEEDER_FULL_WEIGHT_KG:.3f} kg\n"
-                                    "喂食器状态: 满载\n"
-                                    "舵机 ID: 1\n"
-                                    "舵机角度参数: 90°"
-                                ),
-                            )
-                            image_report = gr.Textbox(
-                                label="Qwen 行为分析报告",
-                                lines=12,
-                            )
-                            image_logs = gr.Textbox(
-                                label="本会话日志",
-                                lines=12,
-                                value="暂无本会话日志。",
-                            )
+                    with gr.Column(scale=1):
+                        image_output = gr.Image(label="行为标注结果")
+                        detection_table = gr.Dataframe(
+                            headers=["序号", "类别", "置信度", "边界框"],
+                            datatype=["number", "str", "number", "str"],
+                            row_count=1,
+                            label="检测详情",
+                        )
+                        detection_summary = gr.Textbox(
+                            label="检测摘要",
+                            lines=2,
+                        )
+                        environment_status = gr.Textbox(
+                            label="当前环境与喂食器状态",
+                            lines=8,
+                            value=(
+                                f"当前温度: {SIMULATED_NORTHEAST_TEMPERATURE_C:.1f} °C\n"
+                                f"当前湿度: {SIMULATED_NORTHEAST_HUMIDITY_PERCENT:.1f} %RH\n"
+                                f"喂食器食物重量: {SIMULATED_FEEDER_FULL_WEIGHT_KG:.3f} kg\n"
+                                "喂食器状态: 满载\n"
+                                "舵机 ID: 1\n"
+                                "舵机角度参数: 90°"
+                            ),
+                        )
+                        image_report = gr.Textbox(
+                            label="Qwen 行为分析报告",
+                            lines=12,
+                        )
+                        image_logs = gr.Textbox(
+                            label="本会话日志",
+                            lines=12,
+                            value="暂无本会话日志。",
+                        )
 
-                with gr.Tab("音频叫声分析"):
-                    with gr.Row():
-                        with gr.Column(scale=1):
-                            audio_input = gr.Audio(
-                                type="filepath",
-                                sources=["upload", "microphone"],
-                                label="上传预先准备好的猫叫声音频",
-                            )
-                            audio_asr_model_name = gr.Textbox(
-                                label="音频识别模型名（猫叫分析不使用ASR）",
-                                value=DEFAULT_AUDIO_ASR_MODEL,
-                            )
-                            audio_reasoning_model_name = gr.Textbox(
-                                label="猫叫情绪分析模型名",
-                                value=DEFAULT_AUDIO_REASONING_MODEL,
-                            )
-                            audio_prompt = gr.Textbox(
-                                label="音频分析提示词",
-                                value=DEFAULT_AUDIO_PROMPT,
-                                lines=4,
-                            )
-                            audio_btn = gr.Button("开始音频分析", variant="primary")
+                with gr.Tab("音频叫声分析"), gr.Row():
+                    with gr.Column(scale=1):
+                        audio_input = gr.Audio(
+                            type="filepath",
+                            sources=["upload", "microphone"],
+                            label="上传预先准备好的猫叫声音频",
+                        )
+                        audio_asr_model_name = gr.Textbox(
+                            label="音频识别模型名（猫叫分析不使用ASR）",
+                            value=DEFAULT_AUDIO_ASR_MODEL,
+                        )
+                        audio_reasoning_model_name = gr.Textbox(
+                            label="猫叫情绪分析模型名",
+                            value=DEFAULT_AUDIO_REASONING_MODEL,
+                        )
+                        audio_prompt = gr.Textbox(
+                            label="音频分析提示词",
+                            value=DEFAULT_AUDIO_PROMPT,
+                            lines=4,
+                        )
+                        audio_btn = gr.Button("开始音频分析", variant="primary")
 
-                        with gr.Column(scale=1):
-                            audio_metadata = gr.Textbox(
-                                label="音频元信息",
-                                lines=8,
-                            )
-                            audio_report = gr.Textbox(
-                                label="Qwen 猫叫情绪分析报告",
-                                lines=12,
-                            )
-                            audio_records = gr.Dataframe(
-                                headers=["序号", "上传时间", "文件名", "大小KB"],
-                                datatype=["number", "str", "str", "number"],
-                                row_count=1,
-                                label="本会话音频记录",
-                            )
-                            audio_logs = gr.Textbox(
-                                label="本会话日志",
-                                lines=12,
-                                value="暂无本会话日志。",
-                            )
+                    with gr.Column(scale=1):
+                        audio_metadata = gr.Textbox(
+                            label="音频元信息",
+                            lines=8,
+                        )
+                        audio_report = gr.Textbox(
+                            label="Qwen 猫叫情绪分析报告",
+                            lines=12,
+                        )
+                        audio_records = gr.Dataframe(
+                            headers=["序号", "上传时间", "文件名", "大小KB"],
+                            datatype=["number", "str", "str", "number"],
+                            row_count=1,
+                            label="本会话音频记录",
+                        )
+                        audio_logs = gr.Textbox(
+                            label="本会话日志",
+                            lines=12,
+                            value="暂无本会话日志。",
+                        )
 
                 with gr.Tab("CH340 硬件收发测试"):
                     with gr.Row():

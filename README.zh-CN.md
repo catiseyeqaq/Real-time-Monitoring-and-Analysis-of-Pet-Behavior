@@ -30,4 +30,3 @@ python .\pet_behavior_gradio_app.py --weight .\path\to\your\best.pt
 ## 许可证与商用
 
 项目代码按 [AGPL-3.0](LICENSE) 发布。商业使用并非自动禁止，但商业使用者必须履行 AGPL-3.0 的源代码、版权、许可证和网络服务交互义务，并分别确认第三方依赖、模型、数据集、API 服务和硬件协议的授权范围。闭源或白标部署前请取得必要的商业授权并完成法律审查，详见 [COMMERCIAL_USE.md](COMMERCIAL_USE.md)。
-
