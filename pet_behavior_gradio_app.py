@@ -5,8 +5,10 @@ import json
 import logging
 import mimetypes
 import os
+import re
 import shutil
 import socket
+import sqlite3
 import subprocess
 import tempfile
 import threading
@@ -48,8 +50,8 @@ DEFAULT_IMAGE_MODEL = "qwen3.5-flash"
 DEFAULT_AUDIO_ASR_MODEL = "不使用ASR"
 DEFAULT_AUDIO_REASONING_MODEL = "qwen3.5-omni-plus"
 DEFAULT_IMAGE_PROMPT = (
-    "你是宠物行为分析助手。请结合图片内容和YOLO检测结果，判断猫咪当前行为，"
-    "说明置信依据、可能的健康风险，并给出主人建议。请使用中文分点输出。"
+    "你是本地宠物问答助手。请结合图片内容和YOLO检测结果，简短判断猫咪当前行为，"
+    "说明可能的健康风险，并给出饲养建议。不要输出置信度依据。请使用中文分点输出。"
 )
 DEFAULT_AUDIO_PROMPT = (
     "你是一个宠物声音行为分析助手。请直接分析音频中的猫叫声，不要把猫叫当成人类语音转写。"
@@ -62,7 +64,7 @@ DEFAULT_AUDIO_PROMPT = (
     "如果音频像猫咪吵架、抢地盘、互相威胁或攻击，请判为fighting。"
     "请只输出JSON，不要输出其他内容，格式为："
     '{"emotion":"hungry|attention|fear|pain|warning|fighting|mating|relaxed|unknown",'
-    '"confidence":0.0,"urgency":1,"reason":"一句话说明判断依据",'
+    '"confidence":0.0,"urgency":1,'
     '"suggestion":"一句话给主人建议"}'
 )
 MAX_LOG_LINES = 200
@@ -70,7 +72,124 @@ QWEN_IMAGE_MAX_SIDE = 1024
 QWEN_IMAGE_JPEG_QUALITY = 82
 CLIENT_DATA_DIR = ROOT_DIR / ".gradio" / "client_data"
 QWEN_TEMP_DIR = ROOT_DIR / ".gradio" / "qwen_temp"
+USER_DB_PATH = ROOT_DIR / ".gradio" / "pet_behavior_users.sqlite3"
 MAX_AUDIO_AGE_DAYS = 7
+
+
+def init_user_db() -> None:
+    USER_DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with sqlite3.connect(USER_DB_PATH) as conn:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS users (
+                username TEXT PRIMARY KEY,
+                password TEXT NOT NULL,
+                api_key TEXT DEFAULT '',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                last_login_at TEXT
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS app_state (
+                key TEXT PRIMARY KEY,
+                value TEXT
+            )
+            """
+        )
+        conn.commit()
+
+
+def get_last_login_user() -> dict:
+    init_user_db()
+    with sqlite3.connect(USER_DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute("SELECT value FROM app_state WHERE key = 'last_username'").fetchone()
+        username = row["value"] if row and row["value"] else ""
+        if not username:
+            return {"username": "", "password": "", "api_key": ""}
+        user = conn.execute(
+            "SELECT username, password, api_key FROM users WHERE username = ?",
+            (username,),
+        ).fetchone()
+        if not user:
+            return {"username": "", "password": "", "api_key": ""}
+        return {
+            "username": user["username"] or "",
+            "password": user["password"] or "",
+            "api_key": user["api_key"] or "",
+        }
+
+
+def login_or_create_user(username: str, password: str, api_key: str) -> tuple[bool, str, str]:
+    init_user_db()
+    username = (username or "").strip()
+    password = (password or "").strip()
+    api_key = (api_key or "").strip()
+    if not username:
+        return False, "", "请输入本地账号。"
+    if not password:
+        return False, "", "请输入本地密码。"
+
+    now = time.strftime("%Y-%m-%d %H:%M:%S")
+    with sqlite3.connect(USER_DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        user = conn.execute(
+            "SELECT username, password, api_key FROM users WHERE username = ?",
+            (username,),
+        ).fetchone()
+        if user and user["password"] != password:
+            return False, "", "本地账号密码不匹配。"
+
+        if user:
+            saved_api_key = api_key or (user["api_key"] or "")
+            conn.execute(
+                """
+                UPDATE users
+                SET api_key = ?, updated_at = ?, last_login_at = ?
+                WHERE username = ?
+                """,
+                (saved_api_key, now, now, username),
+            )
+        else:
+            saved_api_key = api_key
+            conn.execute(
+                """
+                INSERT INTO users (username, password, api_key, created_at, updated_at, last_login_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (username, password, saved_api_key, now, now, now),
+            )
+        conn.execute(
+            """
+            INSERT INTO app_state (key, value) VALUES ('last_username', ?)
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value
+            """,
+            (username,),
+        )
+        conn.commit()
+    return True, saved_api_key, f"本地用户 {username} 登录成功。"
+
+
+def save_user_api_key(username: str, api_key: str, client_state: dict | None) -> tuple[str, str, dict]:
+    client_state = client_state or new_client_state()
+    username = (username or "").strip()
+    api_key = (api_key or "").strip()
+    if not username:
+        client_state = client_log(client_state, "保存 API Key 失败：当前未登录本地用户", "warning")
+        return "当前未登录本地用户，无法保存 API Key。", get_client_logs(client_state), client_state
+    init_user_db()
+    now = time.strftime("%Y-%m-%d %H:%M:%S")
+    with sqlite3.connect(USER_DB_PATH) as conn:
+        conn.execute(
+            "UPDATE users SET api_key = ?, updated_at = ? WHERE username = ?",
+            (api_key, now, username),
+        )
+        conn.commit()
+    client_state = client_log(client_state, f"已保存当前用户 {username} 的 API Key")
+    return f"已保存当前用户 {username} 的 API Key。", get_client_logs(client_state), client_state
 
 
 def cleanup_old_temp_files() -> None:
@@ -80,11 +199,15 @@ def cleanup_old_temp_files() -> None:
         now = time.time()
         removed = 0
         for p in d.rglob("*"):
-            if p.is_file() and (now - p.stat().st_mtime) > MAX_AUDIO_AGE_DAYS * 86400:
+            try:
+                is_expired_file = p.is_file() and (now - p.stat().st_mtime) > MAX_AUDIO_AGE_DAYS * 86400
+            except FileNotFoundError:
+                continue
+            if is_expired_file:
                 try:
                     p.unlink()
                     removed += 1
-                except OSError:
+                except (FileNotFoundError, OSError):
                     pass
         # remove empty dirs
         for p in sorted(d.rglob("*"), key=lambda x: len(str(x)), reverse=True):
@@ -217,6 +340,15 @@ MODEL_MANAGER = ModelManager(DEFAULT_WEIGHT)
 
 
 DEFAULT_LOCAL_PORT = 7861
+DEFAULT_TEMP_ALARM_C = 35.0
+DEFAULT_FEED_LIMIT_KG = 5.0
+DEFAULT_EATING_DROP_KG = 0.02
+DEFAULT_SERVO_FEED_PACKET = '{"cmd":"servo","id":1,"angle":90}'
+DEFAULT_ALARM_PACKET = '{"cmd":"alarm","level":"high"}'
+SIMULATED_NORTHEAST_TEMPERATURE_C = 22.0
+SIMULATED_NORTHEAST_HUMIDITY_PERCENT = 45.0
+SIMULATED_FEEDER_FULL_WEIGHT_KG = 5.0
+VOMIT_LABEL_KEYWORDS = ("vomit", "emesis", "throw_up", "cat_vomit", "呕吐", "吐")
 
 FRP_SERVER_ADDR = os.environ.get("FRP_SERVER_ADDR", "127.0.0.1")
 FRP_SERVER_PORT = int(os.environ.get("FRP_SERVER_PORT", "7000"))
@@ -432,6 +564,32 @@ def send_ch340_packet(
         return f"CH340 发包失败：{exc}", get_client_logs(client_state), client_state
 
 
+def exchange_ch340_packet(
+    port: str,
+    baudrate: int,
+    packet: str,
+    read_wait: float,
+    append_newline: bool = True,
+) -> str:
+    if not SERIAL_AVAILABLE:
+        raise RuntimeError("pyserial 未安装，无法打开 CH340 串口。")
+    port = (port or "").strip()
+    if not port:
+        raise ValueError("请先选择 CH340 对应的 COM 端口。")
+    data = (packet or "").strip()
+    if not data:
+        raise ValueError("发送包不能为空。")
+
+    tx = data + ("\n" if append_newline else "")
+    with serial.Serial(port=port, baudrate=int(baudrate), timeout=max(read_wait, 0.1)) as ser:
+        ser.reset_input_buffer()
+        ser.write(tx.encode("utf-8"))
+        ser.flush()
+        time.sleep(max(read_wait, 0.0))
+        raw = ser.read(ser.in_waiting or 256)
+    return raw.decode("utf-8", errors="replace").strip() if raw else ""
+
+
 def refresh_serial_ports(client_state: dict | None) -> tuple[gr.Dropdown, str, str, dict]:
     client_state = client_state or new_client_state()
     choices, detail = list_serial_ports()
@@ -454,6 +612,16 @@ def send_temperature_query(
     return send_ch340_packet(port, baudrate, packet, True, read_wait, client_state)
 
 
+def send_humidity_query(
+    port: str,
+    baudrate: int,
+    read_wait: float,
+    client_state: dict | None,
+) -> tuple[str, str, dict]:
+    packet = build_hardware_packet("humidity", action="read")
+    return send_ch340_packet(port, baudrate, packet, True, read_wait, client_state)
+
+
 def send_servo_command(
     port: str,
     baudrate: int,
@@ -464,6 +632,268 @@ def send_servo_command(
 ) -> tuple[str, str, dict]:
     packet = build_hardware_packet("servo", id=int(servo_id), angle=int(angle))
     return send_ch340_packet(port, baudrate, packet, True, read_wait, client_state)
+
+
+def parse_sensor_value(raw: str, keys: tuple[str, ...]) -> float | None:
+    text = (raw or "").strip()
+    if not text:
+        return None
+
+    for line in reversed([part.strip() for part in text.splitlines() if part.strip()]):
+        try:
+            payload = json.loads(line)
+        except json.JSONDecodeError:
+            payload = None
+        if isinstance(payload, dict):
+            for key in keys:
+                value = payload.get(key)
+                if value is not None:
+                    try:
+                        return float(value)
+                    except (TypeError, ValueError):
+                        continue
+
+    match = re.search(r"-?\d+(?:\.\d+)?", text)
+    return float(match.group(0)) if match else None
+
+
+def read_sensor_float(
+    port: str,
+    baudrate: int,
+    read_wait: float,
+    cmd: str,
+    keys: tuple[str, ...],
+) -> tuple[float | None, str]:
+    raw = exchange_ch340_packet(
+        port,
+        int(baudrate),
+        build_hardware_packet(cmd, action="read"),
+        read_wait,
+    )
+    return parse_sensor_value(raw, keys), raw
+
+
+def build_environment_snapshot(
+    port: str,
+    baudrate: int,
+    read_wait: float,
+    servo_id: int,
+    servo_angle: int,
+    client_state: dict | None,
+) -> tuple[str, dict]:
+    client_state = client_state or new_client_state()
+    port = (port or "").strip()
+    dispensed_total = float(client_state.get("dispensed_total_kg") or 0.0)
+    temperature_c = SIMULATED_NORTHEAST_TEMPERATURE_C
+    humidity_percent = SIMULATED_NORTHEAST_HUMIDITY_PERCENT
+    food_weight_kg = SIMULATED_FEEDER_FULL_WEIGHT_KG
+    raw_lines: list[str] = []
+
+    if SERIAL_AVAILABLE and port:
+        try:
+            temperature_c, raw_temp = read_sensor_float(
+                port,
+                int(baudrate),
+                read_wait,
+                "temperature",
+                ("temperature", "temperature_c", "temp", "value"),
+            )
+            humidity_percent, raw_humidity = read_sensor_float(
+                port,
+                int(baudrate),
+                read_wait,
+                "humidity",
+                ("humidity", "humidity_percent", "humidity_rh", "rh", "value"),
+            )
+            food_weight_kg, raw_weight = read_sensor_float(
+                port,
+                int(baudrate),
+                read_wait,
+                "weight",
+                ("weight", "weight_kg", "kg", "value"),
+            )
+            raw_lines = [
+                f"温度原始返回: {raw_temp or '<无返回>'}",
+                f"湿度原始返回: {raw_humidity or '<无返回>'}",
+                f"重量原始返回: {raw_weight or '<无返回>'}",
+            ]
+            if temperature_c is None or humidity_percent is None or food_weight_kg is None:
+                raise RuntimeError("传感器返回值不完整，已切换为模拟环境值。")
+        except Exception as exc:
+            temperature_c = SIMULATED_NORTHEAST_TEMPERATURE_C
+            humidity_percent = SIMULATED_NORTHEAST_HUMIDITY_PERCENT
+            food_weight_kg = SIMULATED_FEEDER_FULL_WEIGHT_KG
+            client_state = client_log(client_state, f"环境传感器读取失败，使用模拟值: {exc}", "warning")
+
+    feeder_status = "满载" if float(food_weight_kg) >= SIMULATED_FEEDER_FULL_WEIGHT_KG * 0.9 else "非满载"
+    status_lines = [
+        f"当前温度: {float(temperature_c):.1f} °C",
+        f"当前湿度: {float(humidity_percent):.1f} %RH",
+        f"喂食器食物重量: {float(food_weight_kg):.3f} kg",
+        f"喂食器状态: {feeder_status}",
+        f"舵机 ID: {int(servo_id)}",
+        f"舵机角度参数: {int(servo_angle)}°",
+        f"本轮累计投放估算: {dispensed_total:.3f} kg",
+    ]
+    if raw_lines:
+        status_lines.append("")
+        status_lines.extend(raw_lines)
+    return "\n".join(status_lines), client_state
+
+
+def add_alarm_record(state: dict, alarm_type: str, detail: str, level: str = "warning") -> None:
+    records = state.setdefault("alarm_records", [])
+    records.append(
+        {
+            "time": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "type": alarm_type,
+            "level": level,
+            "detail": detail,
+        }
+    )
+    del records[:-MAX_LOG_LINES]
+
+
+def format_alarm_records(state: dict | None) -> list[list]:
+    records = (state or {}).get("alarm_records") or []
+    return [
+        [idx, item.get("time", ""), item.get("type", ""), item.get("level", ""), item.get("detail", "")]
+        for idx, item in enumerate(records, start=1)
+    ]
+
+
+def detection_has_vomit(detections: list[dict]) -> bool:
+    for item in detections:
+        label = str(item.get("类别") or item.get("绫诲埆") or "").lower()
+        if any(keyword.lower() in label for keyword in VOMIT_LABEL_KEYWORDS):
+            return True
+    return False
+
+
+def build_local_detection_alert(detections: list[dict], client_state: dict) -> str:
+    if not detection_has_vomit(detections):
+        return ""
+
+    detail = "YOLO 检测到猫呕吐行为，请立即检查宠物状态并清理现场。"
+    add_alarm_record(client_state, "vomit", detail, "error")
+    client_log(client_state, detail, "error")
+    return f"\n\n本地报警：{detail}"
+
+
+def local_feeding_control_cycle(
+    port: str,
+    baudrate: int,
+    read_wait: float,
+    manual_weight_kg: float | None,
+    manual_temperature_c: float | None,
+    manual_humidity_percent: float | None,
+    feed_limit_kg: float,
+    eating_drop_kg: float,
+    temperature_alarm_c: float,
+    servo_packet: str,
+    alarm_packet: str,
+    client_state: dict | None,
+) -> tuple[str, list[list], str, dict]:
+    client_state = client_state or new_client_state()
+    events: list[str] = []
+    weight_kg = manual_weight_kg
+    temperature_c = manual_temperature_c
+    humidity_percent = manual_humidity_percent
+
+    try:
+        if weight_kg is None:
+            raw_weight = exchange_ch340_packet(
+                port,
+                int(baudrate),
+                build_hardware_packet("weight", action="read"),
+                read_wait,
+            )
+            events.append(f"重量传感器返回: {raw_weight or '<无返回>'}")
+            weight_kg = parse_sensor_value(raw_weight, ("weight", "weight_kg", "kg", "value"))
+        if temperature_c is None:
+            raw_temp = exchange_ch340_packet(
+                port,
+                int(baudrate),
+                build_hardware_packet("temperature", action="read"),
+                read_wait,
+            )
+            events.append(f"温度传感器返回: {raw_temp or '<无返回>'}")
+            temperature_c = parse_sensor_value(raw_temp, ("temperature", "temperature_c", "temp", "value"))
+        if humidity_percent is None:
+            raw_humidity = exchange_ch340_packet(
+                port,
+                int(baudrate),
+                build_hardware_packet("humidity", action="read"),
+                read_wait,
+            )
+            events.append(f"湿度传感器返回: {raw_humidity or '<无返回>'}")
+            humidity_percent = parse_sensor_value(raw_humidity, ("humidity", "humidity_percent", "humidity_rh", "rh", "value"))
+
+        if weight_kg is None:
+            raise RuntimeError("未能解析重量值，请确认 CH340 返回 JSON 中包含 weight/weight_kg/kg/value。")
+        if temperature_c is None:
+            raise RuntimeError("未能解析温度值，请确认 CH340 返回 JSON 中包含 temperature/temperature_c/temp/value。")
+        if humidity_percent is None:
+            raise RuntimeError("未能解析湿度值，请确认 CH340 返回 JSON 中包含 humidity/humidity_percent/humidity_rh/rh/value。")
+
+        previous_weight = client_state.get("last_food_weight_kg")
+        dispensed_total = float(client_state.get("dispensed_total_kg") or 0.0)
+        client_state["last_food_weight_kg"] = float(weight_kg)
+
+        events.append(f"当前食物重量: {float(weight_kg):.3f} kg")
+        events.append(f"当前温度: {float(temperature_c):.2f} °C")
+        events.append(f"当前湿度: {float(humidity_percent):.2f} %RH")
+        events.append(f"本轮累计投放估算: {dispensed_total:.3f} / {float(feed_limit_kg):.3f} kg")
+
+        if float(temperature_c) >= float(temperature_alarm_c):
+            detail = f"温度 {float(temperature_c):.2f} °C 超过阈值 {float(temperature_alarm_c):.2f} °C，已触发报警。"
+            add_alarm_record(client_state, "temperature", detail, "error")
+            client_state = client_log(client_state, detail, "error")
+            if alarm_packet.strip():
+                rx = exchange_ch340_packet(port, int(baudrate), alarm_packet, read_wait)
+                events.append(f"报警发包完成: {alarm_packet} | RX: {rx or '<无返回>'}")
+            return "\n".join(events), format_alarm_records(client_state), get_client_logs(client_state), client_state
+
+        if previous_weight is None:
+            events.append("已记录初始食物重量，本次不驱动舵机；下一次检测到重量下降后再自动补投。")
+            client_state = client_log(client_state, "本地联动已记录初始食物重量")
+            return "\n".join(events), format_alarm_records(client_state), get_client_logs(client_state), client_state
+
+        drop = float(previous_weight) - float(weight_kg)
+        events.append(f"本次重量下降: {drop:.3f} kg")
+        if drop < float(eating_drop_kg):
+            events.append("重量下降未达到吃食触发阈值，不投放。")
+            client_state = client_log(client_state, "重量下降未达到阈值，本轮不投放")
+            return "\n".join(events), format_alarm_records(client_state), get_client_logs(client_state), client_state
+
+        projected_total = dispensed_total + max(drop, 0.0)
+        if projected_total > float(feed_limit_kg):
+            detail = (
+                f"本轮投放估算将达到 {projected_total:.3f} kg，超过 {float(feed_limit_kg):.3f} kg 上限，已阻止舵机。"
+            )
+            add_alarm_record(client_state, "feeding_limit", detail, "warning")
+            client_state = client_log(client_state, detail, "warning")
+            return "\n".join(events + [detail]), format_alarm_records(client_state), get_client_logs(client_state), client_state
+
+        rx = exchange_ch340_packet(port, int(baudrate), servo_packet, read_wait)
+        client_state["dispensed_total_kg"] = projected_total
+        events.append(f"检测到猫进食后重量下降，已发送舵机控制码: {servo_packet} | RX: {rx or '<无返回>'}")
+        events.append(f"更新后的本轮累计投放估算: {projected_total:.3f} kg")
+        client_state = client_log(client_state, "本地联动已发送舵机投放控制码")
+        return "\n".join(events), format_alarm_records(client_state), get_client_logs(client_state), client_state
+    except Exception as exc:
+        detail = f"本地联动失败: {exc}"
+        add_alarm_record(client_state, "hardware", detail, "error")
+        client_state = client_log(client_state, detail, "error")
+        return "\n".join(events + [detail]), format_alarm_records(client_state), get_client_logs(client_state), client_state
+
+
+def reset_feeding_session(client_state: dict | None) -> tuple[str, list[list], str, dict]:
+    client_state = client_state or new_client_state()
+    client_state.pop("last_food_weight_kg", None)
+    client_state["dispensed_total_kg"] = 0.0
+    client_state = client_log(client_state, "已重置本轮投喂统计")
+    return "已重置：下次联动检测会重新记录初始重量。", format_alarm_records(client_state), get_client_logs(client_state), client_state
 
 
 def image_file_to_data_uri(file_path: str) -> str:
@@ -758,14 +1188,6 @@ def run_yolo_detection(
         verbose=False,
         device=device or None,
     )
-    results = model.predict(
-        source=image_path,
-        conf=conf_threshold,
-        iou=iou_threshold,
-        imgsz=640,
-        max_det=max_det,
-        verbose=False,
-    )
     elapsed = (time.perf_counter() - start) * 1000
     result = results[0]
     annotated = result.plot()
@@ -806,19 +1228,40 @@ def analyze_image(
     iou_threshold: float,
     max_det: int,
     device: str,
+    serial_port: str,
+    serial_baudrate: int,
+    serial_read_wait: float,
+    servo_id: int,
+    servo_angle: int,
     api_key_input: str,
     api_base: str,
     image_model_name: str,
     image_prompt: str,
     client_state: dict | None,
-) -> tuple[np.ndarray | None, list[list], str, str, str, dict]:
+) -> tuple[np.ndarray | None, list[list], str, str, str, str, dict]:
     client_state = client_state or new_client_state()
     if not image_path:
         client_state = client_log(client_state, "图片分析未执行：未上传图片", "warning")
-        return None, [], "请先上传图片。", "", get_client_logs(client_state), client_state
+        env_status, client_state = build_environment_snapshot(
+            serial_port,
+            int(serial_baudrate),
+            float(serial_read_wait),
+            int(servo_id),
+            int(servo_angle),
+            client_state,
+        )
+        return None, [], "请先上传图片。", env_status, "", get_client_logs(client_state), client_state
 
     try:
         client_state = client_log(client_state, f"开始图片行为分析 | image={Path(image_path).name}")
+        env_status, client_state = build_environment_snapshot(
+            serial_port,
+            int(serial_baudrate),
+            float(serial_read_wait),
+            int(servo_id),
+            int(servo_angle),
+            client_state,
+        )
         annotated, rows, detections, summary = run_yolo_detection(
             image_path=image_path,
             conf_threshold=conf_threshold,
@@ -826,11 +1269,12 @@ def analyze_image(
             max_det=max_det,
             device=device,
         )
+        local_alert = build_local_detection_alert(detections, client_state)
         api_key = resolve_api_key(api_key_input)
         if not api_key:
             client_state = client_log(client_state, "未提供API Key，跳过Qwen分析，仅返回YOLO检测结果", "warning")
-            report = "未提供API Key，当前仅展示YOLO检测结果。填写 API Key 后可继续调用 Qwen 分析。"
-            return annotated, rows, summary, report, get_client_logs(client_state), client_state
+            report = "未提供API Key，当前仅展示YOLO检测结果。填写 API Key 后可继续调用 Qwen 分析。" + local_alert
+            return annotated, rows, summary, env_status, report, get_client_logs(client_state), client_state
 
         qwen_image_path, image_compress_info = prepare_image_for_qwen(image_path)
         context_text = (
@@ -859,13 +1303,21 @@ def analyze_image(
             f"本次图片分析模型：{used_model}\n"
             f"Qwen图片压缩：{image_compress_info['原始尺寸']} -> {image_compress_info['压缩尺寸']}，"
             f"{image_compress_info['原始大小KB']}KB -> {image_compress_info['压缩后大小KB']}KB\n\n"
-            f"{report}"
+            f"{report}{local_alert}"
         )
         client_state = client_log(client_state, "图片行为分析流程完成")
-        return annotated, rows, summary, report, get_client_logs(client_state), client_state
+        return annotated, rows, summary, env_status, report, get_client_logs(client_state), client_state
     except Exception as exc:
         client_state = client_log(client_state, f"图片行为分析失败: {exc}", "error")
-        return None, [], "图片分析失败。", str(exc), get_client_logs(client_state), client_state
+        fallback_env, client_state = build_environment_snapshot(
+            "",
+            int(serial_baudrate or 115200),
+            float(serial_read_wait or 0.5),
+            int(servo_id or 1),
+            int(servo_angle or 90),
+            client_state,
+        )
+        return None, [], "图片分析失败。", fallback_env, str(exc), get_client_logs(client_state), client_state
 
 
 def analyze_audio(
@@ -950,8 +1402,10 @@ def analyze_audio(
 
 
 def build_demo() -> gr.Blocks:
+    last_login = get_last_login_user()
     with gr.Blocks(title=APP_TITLE) as demo:
         shared_key = gr.State(value="")
+        current_username = gr.State(value="")
         client_state = gr.State(value=new_client_state())
 
         # ======================== 欢迎弹窗 ========================
@@ -990,8 +1444,22 @@ def build_demo() -> gr.Blocks:
                 """,
             )
             with gr.Row():
+                login_username = gr.Textbox(
+                    label="本地账号",
+                    value=last_login["username"],
+                    placeholder="例如 cat_admin",
+                    scale=2,
+                )
+                login_password = gr.Textbox(
+                    label="本地密码",
+                    value=last_login["password"],
+                    type="password",
+                    placeholder="本机保存，用于下次自动填充",
+                    scale=2,
+                )
                 welcome_api_key = gr.Textbox(
-                    label="请输入阿里云 DashScope API Key",
+                    label="当前用户 DashScope API Key",
+                    value=last_login["api_key"],
                     type="password",
                     placeholder="sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
                     scale=4,
@@ -1019,6 +1487,15 @@ def build_demo() -> gr.Blocks:
                     type="password",
                     placeholder="优先读取这里；留空则读取 DASHSCOPE_API_KEY 或 QWEN_API_KEY",
                 )
+                with gr.Row():
+                    current_user_display = gr.Textbox(
+                        label="当前本地用户",
+                        value="",
+                        interactive=False,
+                        scale=2,
+                    )
+                    save_api_key_btn = gr.Button("保存当前用户 API Key", scale=1)
+                api_key_save_status = gr.Markdown("")
                 api_base = gr.Textbox(
                     label="兼容接口地址",
                     value=DEFAULT_API_BASE,
@@ -1043,7 +1520,8 @@ def build_demo() -> gr.Blocks:
                         with gr.Column(scale=1):
                             image_input = gr.Image(
                                 type="filepath",
-                                label="上传待分析图片",
+                                sources=["upload", "webcam"],
+                                label="本地摄像头 / 上传图片检测",
                             )
                             conf_threshold = gr.Slider(
                                 minimum=0.1,
@@ -1095,6 +1573,18 @@ def build_demo() -> gr.Blocks:
                             detection_summary = gr.Textbox(
                                 label="检测摘要",
                                 lines=2,
+                            )
+                            environment_status = gr.Textbox(
+                                label="当前环境与喂食器状态",
+                                lines=8,
+                                value=(
+                                    f"当前温度: {SIMULATED_NORTHEAST_TEMPERATURE_C:.1f} °C\n"
+                                    f"当前湿度: {SIMULATED_NORTHEAST_HUMIDITY_PERCENT:.1f} %RH\n"
+                                    f"喂食器食物重量: {SIMULATED_FEEDER_FULL_WEIGHT_KG:.3f} kg\n"
+                                    "喂食器状态: 满载\n"
+                                    "舵机 ID: 1\n"
+                                    "舵机角度参数: 90°"
+                                ),
                             )
                             image_report = gr.Textbox(
                                 label="Qwen 行为分析报告",
@@ -1201,6 +1691,8 @@ def build_demo() -> gr.Blocks:
                         with gr.Column(scale=1):
                             temperature_btn = gr.Button("读取温度")
                         with gr.Column(scale=1):
+                            humidity_btn = gr.Button("读取湿度")
+                        with gr.Column(scale=1):
                             servo_id = gr.Number(label="舵机 ID", value=1, precision=0)
                             servo_angle = gr.Slider(
                                 minimum=0,
@@ -1211,6 +1703,65 @@ def build_demo() -> gr.Blocks:
                             )
                             servo_btn = gr.Button("发送舵机角度")
 
+                with gr.Tab("本地联动控制"):
+                    with gr.Row():
+                        with gr.Column(scale=1):
+                            manual_weight = gr.Number(
+                                label="当前食物重量 kg（留空则从 CH340 读取）",
+                                value=None,
+                                precision=3,
+                            )
+                            manual_temperature = gr.Number(
+                                label="当前温度 °C（留空则从 CH340 读取）",
+                                value=None,
+                                precision=2,
+                            )
+                            manual_humidity = gr.Number(
+                                label="当前湿度 %RH（留空则从 CH340 读取）",
+                                value=None,
+                                precision=2,
+                            )
+                            feed_limit = gr.Number(
+                                label="单轮投放上限 kg",
+                                value=DEFAULT_FEED_LIMIT_KG,
+                                precision=3,
+                            )
+                            eating_drop = gr.Number(
+                                label="吃食触发重量下降 kg",
+                                value=DEFAULT_EATING_DROP_KG,
+                                precision=3,
+                            )
+                            temperature_alarm = gr.Number(
+                                label="温度报警阈值 °C",
+                                value=DEFAULT_TEMP_ALARM_C,
+                                precision=2,
+                            )
+                        with gr.Column(scale=1):
+                            auto_servo_packet = gr.Textbox(
+                                label="自动投放舵机控制码",
+                                value=DEFAULT_SERVO_FEED_PACKET,
+                                lines=2,
+                            )
+                            auto_alarm_packet = gr.Textbox(
+                                label="温度过高报警控制码",
+                                value=DEFAULT_ALARM_PACKET,
+                                lines=2,
+                            )
+                            auto_cycle_btn = gr.Button("执行一次本地联动检测", variant="primary")
+                            reset_feed_btn = gr.Button("重置本轮投喂统计")
+
+                    with gr.Row():
+                        local_control_status = gr.Textbox(
+                            label="本地联动状态",
+                            lines=12,
+                        )
+                        alarm_records = gr.Dataframe(
+                            headers=["序号", "时间", "类型", "级别", "详情"],
+                            datatype=["number", "str", "str", "str", "str"],
+                            row_count=1,
+                            label="本地报警记录",
+                        )
+
             image_btn.click(
                 fn=analyze_image,
                 inputs=[
@@ -1219,6 +1770,11 @@ def build_demo() -> gr.Blocks:
                     iou_threshold,
                     max_det,
                     device,
+                    serial_port,
+                    serial_baudrate,
+                    serial_read_wait,
+                    servo_id,
+                    servo_angle,
                     api_key_input,
                     api_base,
                     image_model_name,
@@ -1229,6 +1785,7 @@ def build_demo() -> gr.Blocks:
                     image_output,
                     detection_table,
                     detection_summary,
+                    environment_status,
                     image_report,
                     image_logs,
                     client_state,
@@ -1275,6 +1832,11 @@ def build_demo() -> gr.Blocks:
                 inputs=[serial_port, serial_baudrate, serial_read_wait, client_state],
                 outputs=[hardware_result, hardware_logs, client_state],
             )
+            humidity_btn.click(
+                fn=send_humidity_query,
+                inputs=[serial_port, serial_baudrate, serial_read_wait, client_state],
+                outputs=[hardware_result, hardware_logs, client_state],
+            )
             servo_btn.click(
                 fn=send_servo_command,
                 inputs=[
@@ -1287,6 +1849,29 @@ def build_demo() -> gr.Blocks:
                 ],
                 outputs=[hardware_result, hardware_logs, client_state],
             )
+            auto_cycle_btn.click(
+                fn=local_feeding_control_cycle,
+                inputs=[
+                    serial_port,
+                    serial_baudrate,
+                    serial_read_wait,
+                    manual_weight,
+                    manual_temperature,
+                    manual_humidity,
+                    feed_limit,
+                    eating_drop,
+                    temperature_alarm,
+                    auto_servo_packet,
+                    auto_alarm_packet,
+                    client_state,
+                ],
+                outputs=[local_control_status, alarm_records, hardware_logs, client_state],
+            )
+            reset_feed_btn.click(
+                fn=reset_feeding_session,
+                inputs=[client_state],
+                outputs=[local_control_status, alarm_records, hardware_logs, client_state],
+            )
 
             gr.on(
                 triggers=[image_model_name.change, audio_asr_model_name.change, audio_reasoning_model_name.change],
@@ -1298,27 +1883,36 @@ def build_demo() -> gr.Blocks:
             )
 
         # ======================== 欢迎页 → 主界面切换 ========================
-        def enter_system(api_key: str) -> tuple:
-            key = (api_key or "").strip()
-            if not key:
+        def enter_system(username: str, password: str, api_key: str) -> tuple:
+            ok, saved_key, message = login_or_create_user(username, password, api_key)
+            if not ok:
+                push_log(f"本地用户登录失败: {message}", level="warning")
                 return (
                     gr.update(visible=True),
                     gr.update(visible=False),
                     "",
-                    "请输入有效的 API Key 后再进入系统。",
+                    "",
+                    "",
+                    message,
                 )
-            push_log("用户已填写 API Key，进入主界面")
+            username = (username or "").strip()
+            if saved_key:
+                push_log(f"本地用户 {username} 已登录，已载入 API Key")
+            else:
+                push_log(f"本地用户 {username} 已登录，未配置 API Key，进入本地 YOLO/硬件联动模式")
             return (
                 gr.update(visible=False),
                 gr.update(visible=True),
-                key,
-                "",
+                saved_key,
+                username,
+                username,
+                message if saved_key else f"{message} 当前未保存 API Key，Qwen 分析会自动跳过。",
             )
 
         welcome_btn.click(
             fn=enter_system,
-            inputs=[welcome_api_key],
-            outputs=[welcome_section, main_section, shared_key, welcome_msg],
+            inputs=[login_username, login_password, welcome_api_key],
+            outputs=[welcome_section, main_section, shared_key, current_username, current_user_display, welcome_msg],
         )
 
         # 将共享的 key 同步到主界面的 api_key_input
@@ -1327,13 +1921,18 @@ def build_demo() -> gr.Blocks:
             inputs=[shared_key],
             outputs=[api_key_input],
         )
+        save_api_key_btn.click(
+            fn=save_user_api_key,
+            inputs=[current_username, api_key_input, client_state],
+            outputs=[api_key_save_status, image_logs, client_state],
+        )
 
     return demo
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=APP_TITLE)
-    parser.add_argument("--host", default="0.0.0.0", help="Gradio监听地址")
+    parser.add_argument("--host", default="127.0.0.1", help="Gradio监听地址")
     parser.add_argument(
         "--port",
         type=int,
@@ -1343,8 +1942,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--no-frp",
         action="store_true",
-        default=False,
+        default=True,
         help="禁用 frp 公网映射，仅启动本地 Gradio 服务",
+    )
+    parser.add_argument(
+        "--enable-frp",
+        action="store_true",
+        default=False,
+        help="显式启用 frp 公网映射；默认只在 localhost 本地运行",
     )
     parser.add_argument(
         "--weight",
@@ -1364,7 +1969,7 @@ def main() -> None:
         push_log(f"端口 {args.port} 已被占用，自动切换为端口 {port}")
 
     frpc_proc = None
-    if not args.no_frp:
+    if args.enable_frp:
         frpc_proc = _start_frpc_tunnel(port)
         if frpc_proc is not None:
             atexit.register(lambda: _stop_own_frpc())
