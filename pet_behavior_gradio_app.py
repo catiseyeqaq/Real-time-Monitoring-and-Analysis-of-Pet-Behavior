@@ -21,7 +21,7 @@ from pathlib import Path
 import gradio as gr
 import numpy as np
 from PIL import Image
-from ultralytics import YOLO
+from ultralytics import YOLO as BehaviorModel
 
 try:
     import serial
@@ -36,8 +36,8 @@ except ImportError:
 APP_TITLE = "智能宠物行为识别演示系统"
 ROOT_DIR = Path(__file__).resolve().parent
 DEFAULT_WEIGHT_CANDIDATES = [
-    ROOT_DIR / "runs" / "train" / "cat_behavior_yolo26n" / "weights" / "best.pt",
-    ROOT_DIR / "runs" / "train" / "yolo-GDL" / "weights" / "best.pt",
+    ROOT_DIR / "runs" / "train" / "pet_behavior" / "weights" / "best.pt",
+    ROOT_DIR / "runs" / "train" / "pet_behavior" / "weights" / "best.pt",
 ]
 DEFAULT_WEIGHT = next(
     (weight_path for weight_path in DEFAULT_WEIGHT_CANDIDATES if weight_path.exists()),
@@ -48,7 +48,7 @@ DEFAULT_IMAGE_MODEL = "qwen3.5-flash"
 DEFAULT_AUDIO_ASR_MODEL = "不使用ASR"
 DEFAULT_AUDIO_REASONING_MODEL = "qwen3.5-omni-plus"
 DEFAULT_IMAGE_PROMPT = (
-    "你是宠物行为分析助手。请结合图片内容和YOLO检测结果，判断猫咪当前行为，"
+    "你是宠物行为分析助手。请结合图片内容和本地行为检测结果，判断猫咪当前行为，"
     "说明置信依据、可能的健康风险，并给出主人建议。请使用中文分点输出。"
 )
 DEFAULT_AUDIO_PROMPT = (
@@ -198,18 +198,18 @@ class ModelManager:
         self._model = None
         self._lock = threading.Lock()
 
-    def get_model(self) -> YOLO:
+    def get_model(self) -> BehaviorModel:
         if self._model is None:
             with self._lock:
                 if self._model is None:
                     if not self.weight_path.exists():
                         raise FileNotFoundError(
-                            f"YOLO权重文件不存在: {self.weight_path}\n"
+                            f"行为模型文件不存在: {self.weight_path}\n"
                             f"请先使用 train.py 训练模型，或通过 --weight 参数指定正确的权重路径。"
                         )
-                    push_log(f"开始加载YOLO权重: {self.weight_path}")
-                    self._model = YOLO(str(self.weight_path))
-                    push_log("YOLO权重加载完成")
+                    push_log(f"开始加载本地行为模型: {self.weight_path}")
+                    self._model = BehaviorModel(str(self.weight_path))
+                    push_log("本地行为模型加载完成")
         return self._model
 
 
@@ -381,7 +381,7 @@ def _start_frpc_tunnel(local_port: int) -> subprocess.Popen | None:
 
 def list_serial_ports() -> tuple[list[str], str]:
     if not SERIAL_AVAILABLE:
-        return [], "pyserial 未安装，请先在 yolo 环境中安装 pyserial。"
+        return [], "pyserial 未安装，请先安装项目依赖。"
     ports = list(serial.tools.list_ports.comports())
     choices = [port.device for port in ports]
     lines = [f"{port.device} | {port.description} | hwid={port.hwid}" for port in ports]
@@ -736,7 +736,7 @@ def format_detection_summary(detections: list[dict]) -> str:
     return f"检测到 {len(detections)} 个目标：{stats}。"
 
 
-def run_yolo_detection(
+def run_behavior_detection(
     image_path: str,
     conf_threshold: float,
     iou_threshold: float,
@@ -746,7 +746,7 @@ def run_yolo_detection(
     start = time.perf_counter()
     model = MODEL_MANAGER.get_model()
     push_log(
-        f"开始YOLO推理 | image={image_path} | conf={conf_threshold:.2f} | "
+        f"开始本地行为识别 | image={image_path} | conf={conf_threshold:.2f} | "
         f"iou={iou_threshold:.2f} | max_det={max_det} | device='{device or 'auto'}'"
     )
     results = model.predict(
@@ -781,7 +781,7 @@ def run_yolo_detection(
         rows.append([idx, label, round(conf, 4), str(xyxy)])
 
     summary = format_detection_summary(detections)
-    push_log(f"YOLO推理完成 | det_count={len(detections)} | cost_ms={elapsed:.2f} | summary={summary}")
+    push_log(f"本地行为识别完成 | det_count={len(detections)} | cost_ms={elapsed:.2f} | summary={summary}")
     return annotated, rows, detections, summary
 
 
@@ -811,7 +811,7 @@ def analyze_image(
 
     try:
         client_state = client_log(client_state, f"开始图片行为分析 | image={Path(image_path).name}")
-        annotated, rows, detections, summary = run_yolo_detection(
+        annotated, rows, detections, summary = run_behavior_detection(
             image_path=image_path,
             conf_threshold=conf_threshold,
             iou_threshold=iou_threshold,
@@ -820,15 +820,15 @@ def analyze_image(
         )
         api_key = resolve_api_key(api_key_input)
         if not api_key:
-            client_state = client_log(client_state, "未提供API Key，跳过Qwen分析，仅返回YOLO检测结果", "warning")
-            report = "未提供API Key，当前仅展示YOLO检测结果。填写 API Key 后可继续调用 Qwen 分析。"
+            client_state = client_log(client_state, "未提供API Key，跳过云端语义分析，仅返回本地行为识别结果", "warning")
+            report = "未提供 API Key，当前仅展示本地行为识别结果。填写 API Key 后可继续调用语义分析。"
             return annotated, rows, summary, report, get_client_logs(client_state), client_state
 
         qwen_image_path, image_compress_info = prepare_image_for_qwen(image_path)
         context_text = (
             f"图片文件: {Path(image_path).name}\n"
-            f"YOLO摘要: {summary}\n"
-            f"YOLO详情: {json.dumps(detections, ensure_ascii=False)}\n"
+            f"行为识别摘要: {summary}\n"
+            f"行为识别详情: {json.dumps(detections, ensure_ascii=False)}\n"
             f"发送给Qwen前的图片压缩信息: {json.dumps(image_compress_info, ensure_ascii=False)}"
         )
         try:
@@ -959,7 +959,7 @@ def build_demo() -> gr.Blocks:
                 本系统提供两种猫咪行为分析能力：
 
                 **1. 图片行为分析**
-                - 上传猫咪照片，系统先使用 **YOLO 目标检测** 识别猫咪行为类别
+                - 上传猫咪照片，系统先使用 **本地行为识别模块** 识别猫咪行为类别
                   （猫喝水、猫进食、猫玩耍、猫睡觉、猫呕吐、猫如厕）
                 - 再将检测结果与图片一起发送给 **阿里云通义千问 (Qwen)** 多模态大模型
                 - Qwen 会综合判断猫咪行为、评估健康风险，并给出养护建议
@@ -973,7 +973,7 @@ def build_demo() -> gr.Blocks:
                 ### 重要提示
 
                 - 本系统依赖 **阿里云 DashScope API**，需要有效的 API Key 才能使用 AI 分析功能
-                - 如不填写 API Key，仅能查看基础的 YOLO 检测 / 音频元信息结果
+                - 如不填写 API Key，仍可查看本地行为识别 / 音频元信息结果
                 - API Key 仅保存在当前会话内存中，关闭页面后不会留存
 
                 **获取 API Key：** 访问 [阿里云百炼平台](https://bailian.console.aliyun.com/) 开通 DashScope 服务即可获取
@@ -1000,7 +1000,7 @@ def build_demo() -> gr.Blocks:
                 f"""
                 # {APP_TITLE}
                 支持两类演示流程：
-                1. 上传猫咪图片，先做 YOLO 目标检测，再把图片和检测结果交给 Qwen 做语义分析。
+                1. 上传猫咪图片，先做本地行为识别，再把图片和识别结果交给语义接口做分析。
                 2. 上传预先准备好的猫叫声音频，提取元信息后直接交给 Qwen Omni 做猫叫情绪分类。
 
                 后台终端会打印详细日志，页面中也会同步显示最近日志，方便调试。
@@ -1061,7 +1061,7 @@ def build_demo() -> gr.Blocks:
                                 label="最多保留目标数",
                             )
                             device = gr.Dropdown(
-                                label="YOLO 推理设备",
+                                label="行为识别设备",
                                 choices=["", "cpu", "cuda:0", "cuda:1"],
                                 value="",
                                 allow_custom_value=True,
@@ -1079,7 +1079,7 @@ def build_demo() -> gr.Blocks:
                             image_btn = gr.Button("开始图片分析", variant="primary")
 
                         with gr.Column(scale=1):
-                            image_output = gr.Image(label="YOLO 标注结果")
+                            image_output = gr.Image(label="行为标注结果")
                             detection_table = gr.Dataframe(
                                 headers=["序号", "类别", "置信度", "边界框"],
                                 datatype=["number", "str", "number", "str"],
@@ -1327,7 +1327,7 @@ def build_demo() -> gr.Blocks:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=APP_TITLE)
-    parser.add_argument("--host", default="0.0.0.0", help="Gradio监听地址")
+    parser.add_argument("--host", default="127.0.0.1", help="Gradio监听地址，默认仅本机访问")
     parser.add_argument(
         "--port",
         type=int,
@@ -1335,15 +1335,15 @@ def parse_args() -> argparse.Namespace:
         help=f"Gradio本地端口 (默认 {DEFAULT_LOCAL_PORT})",
     )
     parser.add_argument(
-        "--no-frp",
+        "--enable-frp",
         action="store_true",
         default=False,
-        help="禁用 frp 公网映射，仅启动本地 Gradio 服务",
+        help="显式启用 frp 公网映射（默认关闭）",
     )
     parser.add_argument(
         "--weight",
         default=str(DEFAULT_WEIGHT),
-        help="YOLO权重路径",
+        help="行为模型权重路径",
     )
     return parser.parse_args()
 
@@ -1358,7 +1358,7 @@ def main() -> None:
         push_log(f"端口 {args.port} 已被占用，自动切换为端口 {port}")
 
     frpc_proc = None
-    if not args.no_frp:
+    if args.enable_frp:
         frpc_proc = _start_frpc_tunnel(port)
         if frpc_proc is not None:
             atexit.register(lambda: _stop_own_frpc())
